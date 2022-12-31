@@ -11,14 +11,11 @@ import subprocess
 import numpy as np
 import collections
 
-from distutils.spawn import find_executable
-
 from .. import util
 from ..base import Trimesh
 
 # find the executable for binvox in PATH
-binvox_encoder = find_executable('binvox')
-
+binvox_encoder = util.which('binvox')
 Binvox = collections.namedtuple(
     'Binvox', ['rle_data', 'shape', 'translate', 'scale'])
 
@@ -211,7 +208,8 @@ def voxel_from_binvox(
         raise ValueError(
             "Invalid axis_order '%s': must be None, 'xyz' or 'xzy'")
 
-    assert(encoding.shape == shape)
+    assert encoding.shape == shape
+
     return VoxelGrid(encoding, transform)
 
 

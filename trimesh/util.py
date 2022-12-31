@@ -13,10 +13,11 @@ import abc
 import sys
 import copy
 import json
+import uuid
 import base64
+import random
 import shutil
 import logging
-import hashlib
 import zipfile
 import tempfile
 import collections
@@ -32,22 +33,23 @@ else:
 
 # a flag we can check elsewhere for Python 3
 PY3 = sys.version_info.major >= 3
+
 if PY3:
     # for type checking
     basestring = str
     # Python 3
     from io import BytesIO, StringIO
-    # will be the highest granularity clock available
-    from time import perf_counter as now
+    from shutil import which  # noqa
+    from time import perf_counter as now  # noqa
 else:
     # Python 2
     from StringIO import StringIO
+    from distutils.spawn import find_executable as which  # noqa
     # monkey patch StringIO so `with` statements work
     StringIO.__enter__ = lambda a: a
     StringIO.__exit__ = lambda a, b, c, d: a.close()
     BytesIO = StringIO
-    # perf_counter not available on python 2
-    from time import time as now
+    from time import time as now  # noqa
 
 
 try:
@@ -569,7 +571,7 @@ try:
     # only included in recent-ish version of numpy
     multi_dot = np.linalg.multi_dot
 except AttributeError:
-    log.warning('np.linalg.multi_dot not available, using fallback')
+    log.debug('np.linalg.multi_dot not available, using fallback')
 
     def multi_dot(arrays):
         """
@@ -858,35 +860,6 @@ def decimal_to_digits(decimal, min_digits=None):
     if min_digits is not None:
         digits = np.clip(digits, min_digits, 20)
     return digits
-
-
-def hash_file(file_obj,
-              hash_function=hashlib.md5):
-    """
-    Get the hash of an open file-like object.
-
-    Parameters
-    ------------
-    file_obj: file like object
-    hash_function: function to use to hash data
-
-    Returns
-    ---------
-    hashed: str, hex version of result
-    """
-    # before we read the file data save the current position
-    # in the file (which is probably 0)
-    file_position = file_obj.tell()
-    # create an instance of the hash object
-    hasher = hash_function()
-    # read all data from the file into the hasher
-    hasher.update(file_obj.read())
-    # get a hex version of the result
-    hashed = hasher.hexdigest()
-    # return the file object to its original position
-    file_obj.seek(file_position)
-
-    return hashed
 
 
 def attach_to_log(level=logging.DEBUG,
@@ -1488,6 +1461,8 @@ def concatenate(a, b=None):
     # if there is only one mesh just return the first
     if len(meshes) == 1:
         return meshes[0].copy()
+    elif len(meshes) == 0:
+        return []
 
     # extract the trimesh type to avoid a circular import
     # and assert that both inputs are Trimesh objects
@@ -1513,13 +1488,11 @@ def concatenate(a, b=None):
             'failed to combine visuals', exc_info=True)
         visual = None
     # create the mesh object
-    mesh = trimesh_type(vertices=vertices,
+    return trimesh_type(vertices=vertices,
                         faces=faces,
                         face_normals=face_normals,
                         visual=visual,
                         process=False)
-
-    return mesh
 
 
 def submesh(mesh,
@@ -1534,11 +1507,13 @@ def submesh(mesh,
     Parameters
     ------------
     mesh : Trimesh
-       Source mesh to take geometry from
+        Source mesh to take geometry from
     faces_sequence : sequence (p,) int
         Indexes of mesh.faces
+    repair : bool
+        Try to make submeshes watertight
     only_watertight : bool
-        Only return submeshes which are watertight.
+        Only return submeshes which are watertight
     append : bool
         Return a single mesh which has the faces appended,
         if this flag is set, only_watertight is ignored
@@ -1673,9 +1648,10 @@ def jsonify(obj, **kwargs):
 
     Parameters
     --------------
-    obj : JSON-serializable blob
-    **kwargs :
-        Passed to json.dumps
+    obj : list, dict
+      A JSON-serializable blob
+    kwargs : dict
+      Passed to json.dumps
 
     Returns
     --------------
@@ -1913,27 +1889,19 @@ def decompress(file_obj, file_type):
       Data from archive in format {file name : file-like}
     """
 
-    def is_zip():
-        archive = zipfile.ZipFile(file_obj)
-        result = {name: wrap_as_stream(archive.read(name))
-                  for name in archive.namelist()}
-        return result
-
-    def is_tar():
-        import tarfile
-        archive = tarfile.open(fileobj=file_obj, mode='r')
-        result = {name: archive.extractfile(name)
-                  for name in archive.getnames()}
-        return result
-
     file_type = str(file_type).lower()
     if isinstance(file_obj, bytes):
         file_obj = wrap_as_stream(file_obj)
 
-    if file_type[-3:] == 'zip':
-        return is_zip()
+    if file_type.endswith('zip'):
+        archive = zipfile.ZipFile(file_obj)
+        return {name: wrap_as_stream(archive.read(name))
+                for name in archive.namelist()}
     if 'tar' in file_type[-6:]:
-        return is_tar()
+        import tarfile
+        archive = tarfile.open(fileobj=file_obj, mode='r')
+        return {name: archive.extractfile(name)
+                for name in archive.getnames()}
     raise ValueError('Unsupported type passed!')
 
 
@@ -2095,6 +2063,9 @@ def write_encoded(file_obj,
     If a file is open in text mode and bytes are
     passed decode bytes to str and write.
 
+    Assumes binary mode if file_obj does not have
+    a 'mode' attribute (e.g. io.BufferedRandom).
+
     Parameters
     -----------
     file_obj : file object
@@ -2104,7 +2075,7 @@ def write_encoded(file_obj,
     encoding : str
       Encoding of text
     """
-    binary_file = 'b' in file_obj.mode
+    binary_file = 'b' in getattr(file_obj, 'mode', 'b')
     string_stuff = isinstance(stuff, basestring)
     binary_stuff = isinstance(stuff, bytes)
 
@@ -2120,45 +2091,23 @@ def write_encoded(file_obj,
     return stuff
 
 
-def unique_id(length=12, increment=0):
+def unique_id(length=12):
     """
-    Generate a decent looking alphanumeric unique identifier.
-    First 16 bits are time-incrementing, followed by randomness.
-
-    This function is used as a nicer looking alternative to:
-    >>> uuid.uuid4().hex
-
-    Follows the advice in:
-    https://eager.io/blog/how-long-does-an-id-need-to-be/
+    Generate a random alphanumeric unique identifier
+    using UUID logic.
 
     Parameters
     ------------
     length : int
       Length of desired identifier
-    increment : int
-      Number to add to header uint16
-      useful if calling this function repeatedly
-      in a tight loop executing faster than time
-      can increment the header
 
     Returns
     ------------
     unique : str
       Unique alphanumeric identifier
     """
-    # head the identifier with 16 bits of time information
-    # this provides locality and reduces collision chances
-    head = np.array((increment + now() * 10) % 2**16,
-                    dtype=np.uint16).tobytes()
-    # get a bunch of random bytes
-    random = np.random.random(int(np.ceil(length / 5))).tobytes()
-    # encode the time header and random information as base64
-    # replace + and / with spaces
-    unique = base64.b64encode(head + random,
-                              b'  ').decode('utf-8')
-    # remove spaces and cut to length
-    unique = unique.replace(' ', '')[:length]
-    return unique
+    return uuid.UUID(int=random.getrandbits(128),
+                     version=4).hex[:length]
 
 
 def generate_basis(z, epsilon=1e-12):
@@ -2250,7 +2199,7 @@ def isclose(a, b, atol):
     return close
 
 
-def allclose(a, b, atol):
+def allclose(a, b, atol=1e-8):
     """
     A replacement for np.allclose that does few checks
     and validation and as a result is faster.
@@ -2268,7 +2217,7 @@ def allclose(a, b, atol):
     -----------
     bool indicating if all elements are within `atol`.
     """
-    return np.all(np.abs(a - b).max() < atol)
+    return float((a - b).ptp()) < atol
 
 
 class FunctionRegistry(Mapping):
@@ -2355,7 +2304,6 @@ def decode_text(text, initial='utf-8'):
     # if not bytes just return input
     if not hasattr(text, 'decode'):
         return text
-
     try:
         # initially guess file is UTF-8 or specified encoding
         text = text.decode(initial)
@@ -2363,15 +2311,17 @@ def decode_text(text, initial='utf-8'):
         # detect different file encodings
         import chardet
         # try to detect the encoding of the file
-        detect = chardet.detect(text)
+        # only look at the first 1000 characters otherwise
+        # for big files chardet looks at everything and is slow
+        detect = chardet.detect(text[:1000])
         # warn on files that aren't UTF-8
-        log.warning(
+        log.debug(
             'Data not {}! Trying {} (confidence {})'.format(
                 initial,
                 detect['encoding'],
                 detect['confidence']))
         # try to decode again, unwrap in try
-        text = text.decode(detect['encoding'])
+        text = text.decode(detect['encoding'], errors='ignore')
     return text
 
 
@@ -2427,3 +2377,58 @@ def is_ccw(points):
     ccw = area < 0
 
     return ccw
+
+
+def unique_name(start, contains):
+    """
+    Deterministically generate a unique name not
+    contained in a dict, set or other grouping with
+    `__includes__` defined. Will create names of the
+    form "start_10" and increment accordingly.
+
+    Parameters
+    -----------
+    start : str
+      Initial guess for name.
+    contains : dict, set, or list
+      Bundle of existing names we can *not* use.
+
+    Returns
+    ---------
+    unique : str
+      A name that is not contained in `contains`
+    """
+    # exit early if name is not in bundle
+    if (start is not None and
+        len(start) > 0 and
+            start not in contains):
+        return start
+
+    # start checking with zero index
+    increment = 0
+    if start is not None and len(start) > 0:
+        formatter = start + '_{}'
+        # split by our delimiter once
+        split = start.rsplit('_', 1)
+        if len(split) == 2:
+            try:
+                # start incrementing from the existing
+                # trailing value
+                # if it is not an integer this will fail
+                increment = int(split[1])
+                # include the first split value
+                formatter = split[0] + '_{}'
+            except BaseException:
+                pass
+    else:
+        formatter = 'geometry_{}'
+
+    # if contains is empty we will only need to check once
+    for i in range(increment + 1, 2 + increment + len(contains)):
+        check = formatter.format(i)
+        if check not in contains:
+            return check
+
+    # this should really never happen since we looped
+    # through the full length of contains
+    raise ValueError('Unable to establish unique name!')

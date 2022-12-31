@@ -3,7 +3,6 @@ import numpy as np
 from shapely import ops
 from shapely.geometry import Polygon
 
-from .. import util
 from .. import bounds
 from .. import graph
 from .. import geometry
@@ -94,10 +93,14 @@ def enclosure_tree(polygons):
     if len(degrees) > 0 and degrees.max() > 1:
         # collect new edges for graph
         edges = []
+
+        # order the roots so they are sorted by degree
+        roots = roots[np.argsort([degree[r] for r in roots])]
         # find edges of subgraph for each root and children
         for root in roots:
             children = indexes[degrees == degree[root] + 1]
-            edges.extend(contains.subgraph(np.append(children, root)).edges())
+            edges.extend(contains.subgraph(
+                np.append(children, root)).edges())
         # stack edges into new directed graph
         contains = nx.from_edgelist(edges, nx.DiGraph())
         # if roots have no children add them anyway
@@ -124,13 +127,20 @@ def edges_to_polygons(edges, vertices):
       Polygon objects with interiors
     """
 
+    assert isinstance(vertices, np.ndarray)
+
     # create closed polygon objects
     polygons = []
     # loop through a sequence of ordered traversals
     for dfs in graph.traversals(edges, mode='dfs'):
         try:
             # try to recover polygons before they are more complicated
-            polygons.append(repair_invalid(Polygon(vertices[dfs])))
+            repaired = repair_invalid(Polygon(vertices[dfs]))
+            # if it returned a multipolygon extend into a flat list
+            if hasattr(repaired, 'geoms'):
+                polygons.extend(repaired.geoms)
+            else:
+                polygons.append(repaired)
         except ValueError:
             continue
 
@@ -210,7 +220,7 @@ def transform_polygon(polygon, matrix):
     """
     matrix = np.asanyarray(matrix, dtype=np.float64)
 
-    if util.is_sequence(polygon):
+    if hasattr(polygon, 'geoms'):
         result = [transform_polygon(p, t)
                   for p, t in zip(polygon, matrix)]
         return result
@@ -226,7 +236,7 @@ def transform_polygon(polygon, matrix):
     return result
 
 
-def plot(polygon, show=True, **kwargs):
+def plot(polygon, show=True, axes=None, **kwargs):
     """
     Plot a shapely polygon using matplotlib.
 
@@ -242,18 +252,25 @@ def plot(polygon, show=True, **kwargs):
     import matplotlib.pyplot as plt
 
     def plot_single(single):
-        plt.plot(*single.exterior.xy, **kwargs)
+        axes.plot(*single.exterior.xy, **kwargs)
         for interior in single.interiors:
-            plt.plot(*interior.xy, **kwargs)
+            axes.plot(*interior.xy, **kwargs)
     # make aspect ratio non-stupid
-    plt.axes().set_aspect('equal', 'datalim')
-    if util.is_sequence(polygon):
+    if axes is None:
+        axes = plt.axes()
+    axes.set_aspect('equal', 'datalim')
+
+    if polygon.__class__.__name__ == 'MultiPolygon':
+        [plot_single(i) for i in polygon.geoms]
+    elif hasattr(polygon, '__iter__'):
         [plot_single(i) for i in polygon]
     else:
         plot_single(polygon)
 
     if show:
         plt.show()
+
+    return axes
 
 
 def resample_boundaries(polygon, resolution, clip=None):
@@ -451,8 +468,8 @@ def random_polygon(segments=8, radius=1.0):
         (np.cos(angles), np.sin(angles))) * radii.reshape((-1, 1))
     points = np.vstack((points, points[0]))
     polygon = Polygon(points).buffer(0.0)
-    if util.is_sequence(polygon):
-        return polygon[0]
+    if hasattr(polygon, 'geoms'):
+        return polygon.geoms[0]
     return polygon
 
 
@@ -606,7 +623,7 @@ def repair_invalid(polygon, scale=None, rtol=.5):
     # this will fix a subset of problems.
     basic = polygon.buffer(tol.zero)
     # if it returned multiple polygons check the largest
-    if util.is_sequence(basic):
+    if hasattr(basic, 'geoms'):
         basic = basic.geoms[np.argmax([i.area for i in basic.geoms])]
 
     # check perimeter of result against original perimeter
@@ -616,7 +633,8 @@ def repair_invalid(polygon, scale=None, rtol=.5):
         return basic
 
     if scale is None:
-        distance = 0.002 * polygon_scale(polygon)
+        distance = 0.002 * np.reshape(
+            polygon.bounds, (2, 2)).ptp(axis=0).mean()
     else:
         distance = 0.002 * scale
 
@@ -636,7 +654,7 @@ def repair_invalid(polygon, scale=None, rtol=.5):
                 return recon
 
         # try de-deuplicating the outside ring
-        points = np.array(polygon.exterior)
+        points = np.array(polygon.exterior.coords)
         # remove any segments shorter than tol.merge
         # this is a little risky as if it was discretized more
         # finely than 1-e8 it may remove detail
@@ -653,8 +671,10 @@ def repair_invalid(polygon, scale=None, rtol=.5):
     # buffer and unbuffer the whole polygon
     buffered = polygon.buffer(distance).buffer(-distance)
     # if it returned multiple polygons check the largest
-    if util.is_sequence(buffered):
-        buffered = buffered.geoms[np.argmax([i.area for i in buffered.geoms])]
+    if hasattr(buffered, 'geoms'):
+        areas = np.array([b.area for b in buffered.geoms])
+        return buffered.geoms[areas.argmax()]
+
     # check perimeter of result against original perimeter
     if buffered.is_valid and np.isclose(buffered.length,
                                         polygon.length,
@@ -668,12 +688,23 @@ def repair_invalid(polygon, scale=None, rtol=.5):
 def projected(mesh,
               normal,
               origin=None,
-              pad=1e-5,
+              ignore_sign=True,
+              rpad=1e-5,
+              apad=None,
               tol_dot=0.01,
               max_regions=200):
     """
     Project a mesh onto a plane and then extract the polygon
     that outlines the mesh projection on that plane.
+
+    Note that this will ignore back-faces, which is only
+    relevant if the source mesh isn't watertight.
+
+    Also padding: this generates a result by unioning the
+    polygons of multiple connected regions, which requires
+    the polygons be padded by a distance so that a polygon
+    union produces a single coherent result. This distance
+    is calculated as: `apad + (rpad * scale)`
 
     Parameters
     ----------
@@ -685,18 +716,28 @@ def projected(mesh,
       Normal to extract flat pattern along
     origin : None or (3,) float
       Origin of plane to project mesh onto
-    pad : float
+    ignore_sign : bool
+      Allow a projection from the normal vector in
+      either direction: this provides a substantial speedup
+      on watertight meshes where the direction is irrelevant
+      but if you have a triangle soup and want to discard
+      backfaces you should set this to False.
+    rpad : float
       Proportion to pad polygons by before unioning
+      and then de-padding result by to avoid zero-width gaps.
+    apad : float
+      Absolute padding to pad polygons by before unioning
       and then de-padding result by to avoid zero-width gaps.
     tol_dot : float
       Tolerance for discarding on-edge triangles.
     max_regions : int
       Raise an exception if the mesh has more than this
-      number of disconnected regions to fail quickly before unioning.
+      number of disconnected regions to fail quickly before
+      unioning.
 
     Returns
     ----------
-    projected : shapely.geometry.Polygon
+    projected : shapely.geometry.Polygon or None
       Outline of source mesh
 
     Raises
@@ -710,23 +751,29 @@ def projected(mesh,
 
     # the projection of each face normal onto facet normal
     dot_face = np.dot(normal, mesh.face_normals.T)
-    # check if face lies on front or back of normal
-    front = dot_face > tol_dot
-    back = dot_face < -tol_dot
-    # divide the mesh into front facing section and back facing parts
-    # and discard the faces perpendicular to the axis.
-    # since we are doing a unary_union later we can use the front *or*
-    # the back so we use which ever one has fewer triangles
-    # we want the largest nonzero group
-    count = np.array([front.sum(), back.sum()])
-    if count.min() == 0:
-        # if one of the sides has zero faces we need the other
-        pick = count.argmax()
+    if ignore_sign:
+        # for watertight mesh speed up projection by handling side with less faces
+        # check if face lies on front or back of normal
+        front = dot_face > tol_dot
+        back = dot_face < -tol_dot
+        # divide the mesh into front facing section and back facing parts
+        # and discard the faces perpendicular to the axis.
+        # since we are doing a unary_union later we can use the front *or*
+        # the back so we use which ever one has fewer triangles
+        # we want the largest nonzero group
+        count = np.array([front.sum(), back.sum()])
+        if count.min() == 0:
+            # if one of the sides has zero faces we need the other
+            pick = count.argmax()
+        else:
+            # otherwise use the normal direction with the fewest faces
+            pick = count.argmin()
+        # use the picked side
+        side = [front, back][pick]
     else:
-        # otherwise use the normal direction with the fewest faces
-        pick = count.argmin()
-    # use the picked side
-    side = [front, back][pick]
+        # if explicitly asked to care about the sign
+        # only handle the front side of normal
+        side = dot_face > tol_dot
 
     # subset the adjacency pairs to ones which have both faces included
     # on the side we are currently looking at
@@ -761,6 +808,16 @@ def projected(mesh,
         polygons.extend(edges_to_polygons(
             edges=edge[group], vertices=vertices_2D))
 
+    padding = 0.0
+    if apad is not None:
+        # set padding by absolute value
+        padding += float(apad)
+    if rpad is not None:
+        # get the 2D scale as the longest side of the AABB
+        scale = vertices_2D.ptp(axis=0).max()
+        # apply the scale-relative padding
+        padding += float(rpad) * scale
+
     # some types of errors will lead to a bajillion disconnected
     # regions and the union will take forever to fail
     # so exit here early
@@ -769,21 +826,59 @@ def projected(mesh,
 
     # if there is only one region we don't need to run a union
     elif len(polygons) == 1:
-        polygon = polygons[0]
-        # we do however need to double buffer to de-garbage the polygon
-        scale = np.reshape(polygon.bounds, (2, 2)).ptp(axis=0).max()
-        padding = scale * pad
-        polygon = polygon.buffer(padding).buffer(-padding)
+        return polygons[0]
+    elif len(polygons) == 0:
+        return None
     else:
-        # get all points for every AABB
-        extrema = np.reshape([p.bounds for p in polygons], (-1, 2))
-        # extract the model scale from the maximum AABB side length
-        scale = extrema.ptp(axis=0).max()
-        # pad each polygon proportionally to that scale
-        distance = abs(scale * pad)
         # inflate each polygon before unioning to remove zero-size
         # gaps then deflate the result after unioning by the same amount
+        # note the following provides a 25% speedup but needs
+        # more testing to see if it deflates to a decent looking
+        # result:
+        # polygon = ops.unary_union(
+        #    [p.buffer(padding,
+        #              join_style=2,
+        #              mitre_limit=1.5)
+        #     for p in polygons]).buffer(-padding)
         polygon = ops.unary_union(
-            [p.buffer(distance) for p in polygons]).buffer(-distance)
-
+            [p.buffer(padding)
+             for p in polygons]).buffer(-padding)
     return polygon
+
+
+def second_moment(coords):
+    """
+    Calculate the second moment of area of a polygon
+    from the boundary.
+
+    Parameters
+    ------------
+    coords : (n, 2) float or Polygon
+      Closed polygon.
+
+    Returns
+    ----------
+    moments : (3,) float
+      The values of `[Ix, Iy, Ixy]`
+    """
+    if hasattr(coords, 'exterior'):
+        # if we have been passed a shapely.geometry.Polygon
+        exterior = second_moment(np.array(coords.exterior.coords))
+        interiors = np.sum([second_moment(np.array(i.coords))
+                            for i in coords.interiors],
+                           axis=0)
+        return exterior - interiors
+
+    coords = np.asanyarray(coords, dtype=np.float64)
+    # shorthand the coordinates
+    x1, y1 = np.vstack((coords[-1], coords[:-1])).T
+    x2, y2 = coords.T
+    # do vectorized operations
+    v = x1 * y2 - x2 * y1
+    Ix = v * (y1 * y1 + y1 * y2 + y2 * y2)
+    Iy = v * (x1 * x1 + x1 * x2 + x2 * x2)
+    Ixy = v * (x1 * y2 + 2 * x1 * y1 + 2 * x2 * y2 + x2 * y1)
+    # divide by constants and return
+    return np.array([Ix.sum() / 12.0,
+                     Iy.sum() / 12.0,
+                     Ixy.sum() / 24.0], dtype=np.float64)

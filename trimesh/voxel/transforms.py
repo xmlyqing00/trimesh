@@ -33,29 +33,33 @@ class Transform(object):
         # store matrix as data
         self._data = caching.tracked_array(matrix, dtype=np.float64)
         # dump cache when matrix changes
-        self._cache = caching.Cache(id_function=self._data.fast_hash)
-
-    def md5(self):
-        """
-        Get the MD5 hash of the current transformation matrix.
-
-        Returns
-        ------------
-        md5 : str
-          Hash of transformation matrix
-        """
-        return self._data.md5()
+        self._cache = caching.Cache(
+            id_function=self._data.__hash__)
 
     def crc(self):
+        util.log.warning(
+            '`geometry.crc()` is deprecated and will ' +
+            'be removed in October 2023: replace ' +
+            'with `geometry.__hash__()` or `hash(geometry)`')
+        return self.__hash__()
+
+    def hash(self):
+        util.log.warning(
+            '`geometry.hash()` is deprecated and will ' +
+            'be removed in October 2023: replace ' +
+            'with `geometry.__hash__()` or `hash(geometry)`')
+        return self.__hash__()
+
+    def __hash__(self):
         """
-        Get the zlib.adler32 hash of the current transformation matrix.
+        Get the hash of the current transformation matrix.
 
         Returns
         ------------
-        crc : str
+        hash : str
           Hash of transformation matrix
         """
-        return self._data.crc()
+        return self._data.__hash__()
 
     @property
     def translation(self):
@@ -110,8 +114,10 @@ class Transform(object):
         matrix = self.matrix
         # get the (3,) diagonal of the rotation component
         scale = np.diag(matrix[:3, :3])
-        if not util.allclose(
-                matrix[:3, :3], scale * np.eye(3), scale * 1e-6 + 1e-8):
+        if not np.allclose(
+                matrix[:3, :3],
+                scale * np.eye(3),
+                scale * 1e-6 + 1e-8):
             raise RuntimeError('transform features a shear or rotation')
         return scale
 

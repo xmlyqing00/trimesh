@@ -1,5 +1,6 @@
 import os
 import json
+import numpy as np
 
 from .. import util
 from .. import resolvers
@@ -8,10 +9,9 @@ from ..base import Trimesh
 from ..parent import Geometry
 from ..points import PointCloud
 from ..scene.scene import Scene, append_scenes
-from ..constants import log_time, log
+from ..util import log, now
 
 from . import misc
-
 from .xyz import _xyz_loaders
 from .ply import _ply_loaders
 from .stl import _stl_loaders
@@ -22,7 +22,6 @@ from .misc import _misc_loaders
 from .gltf import _gltf_loaders
 from .xaml import _xaml_loaders
 from .binvox import _binvox_loaders
-from .assimp import _assimp_loaders
 from .threemf import _three_loaders
 from .openctm import _ctm_loaders
 from .threedxml import _threedxml_loaders
@@ -35,7 +34,9 @@ except BaseException as E:
     from ..exceptions import closure
     load_path = closure(E)
     # no path formats available
-    def path_formats(): return []
+
+    def path_formats():
+        return set()
 
 
 def mesh_formats():
@@ -48,7 +49,7 @@ def mesh_formats():
       Extensions of available mesh loaders,
       i.e. 'stl', 'ply', etc.
     """
-    return list(mesh_loaders.keys())
+    return set(mesh_loaders.keys())
 
 
 def available_formats():
@@ -61,9 +62,10 @@ def available_formats():
         Extensions of available loaders
         i.e. 'stl', 'ply', 'dxf', etc.
     """
+    # set
     loaders = mesh_formats()
-    loaders.extend(path_formats())
-    loaders.extend(compressed_loaders.keys())
+    loaders.update(path_formats())
+    loaders.update(compressed_loaders.keys())
     return loaders
 
 
@@ -170,7 +172,6 @@ def load(file_obj,
     return loaded
 
 
-@log_time
 def load_mesh(file_obj,
               file_type=None,
               resolver=None,
@@ -206,10 +207,12 @@ def load_mesh(file_obj,
     try:
         # make sure we keep passed kwargs to loader
         # but also make sure loader keys override passed keys
-        results = mesh_loaders[file_type](file_obj,
-                                          file_type=file_type,
-                                          resolver=resolver,
-                                          **kwargs)
+        loader = mesh_loaders[file_type]
+        tic = now()
+        results = loader(file_obj,
+                         file_type=file_type,
+                         resolver=resolver,
+                         **kwargs)
         if not isinstance(results, list):
             results = [results]
 
@@ -220,10 +223,9 @@ def load_mesh(file_obj,
             loaded[-1].metadata.update(metadata)
         if len(loaded) == 1:
             loaded = loaded[0]
-        # show the repr for loaded
-        log.debug('loaded {} using {}'.format(
-            str(loaded),
-            mesh_loaders[file_type].__name__))
+        # show the repr for loaded, loader used, and time
+        log.debug('loaded {} using `{}` in {:0.4f}s'.format(
+            str(loaded), loader.__name__, now() - tic))
     finally:
         # if we failed to load close file
         if opened:
@@ -300,7 +302,8 @@ def load_compressed(file_obj,
         for name, data in files.items():
             try:
                 # only load formats that we support
-                compressed_type = util.split_extension(name).lower()
+                compressed_type = util.split_extension(
+                    name).lower()
 
                 # if file has metadata type include it
                 if compressed_type in 'yaml':
@@ -475,8 +478,9 @@ def load_kwargs(*args, **kwargs):
 
     def handle_path():
         from ..path import Path2D, Path3D
-        shape = kwargs['vertices'].shape
-
+        shape = np.shape(kwargs['vertices'])
+        if len(shape) < 2:
+            return Path2D()
         if shape[1] == 2:
             return Path2D(**kwargs)
         elif shape[1] == 3:
@@ -655,9 +659,6 @@ compressed_loaders = {'zip': load_compressed,
 
 # map file_type to loader function
 mesh_loaders = {}
-# assimp has a lot of loaders, but they are all quite slow
-# load first and replace with native loaders where possible
-mesh_loaders.update(_assimp_loaders)
 mesh_loaders.update(_misc_loaders)
 mesh_loaders.update(_stl_loaders)
 mesh_loaders.update(_ctm_loaders)

@@ -12,7 +12,8 @@ class ExportTest(g.unittest.TestCase):
                 continue
             # export and reload the exported SVG
             loaded = g.trimesh.load(
-                g.trimesh.util.wrap_as_stream(d.export(file_type='svg')),
+                g.trimesh.util.wrap_as_stream(
+                    d.export(file_type='svg')),
                 file_type='svg')
 
             # we only have line and arc primitives as SVG
@@ -25,10 +26,12 @@ class ExportTest(g.unittest.TestCase):
                                     loaded.length,
                                     rtol=.01)
 
-            path_str = g.trimesh.path.exchange.svg_io.export_svg(
-                d, return_path=True)
-            assert isinstance(path_str, str)
-            assert len(path_str) > 0
+                assert len(d.entities) == len(loaded.entities)
+
+                path_str = g.trimesh.path.exchange.svg_io.export_svg(
+                    d, return_path=True)
+                assert isinstance(path_str, str)
+                assert len(path_str) > 0
 
     def test_layer(self):
         from shapely.geometry import Point
@@ -65,9 +68,10 @@ class ExportTest(g.unittest.TestCase):
         assert len(aX.entities) == 1
 
         # make
-        aR = g.trimesh.load(g.io_wrap(c.export(file_type='dxf',
-                                               only_layers=['ACIRCLE'])),
-                            file_type='dxf')
+        aR = g.trimesh.load(g.io_wrap(c.export(
+            file_type='dxf',
+            only_layers=['ACIRCLE'])),
+            file_type='dxf')
 
         assert g.np.isclose(aR.area, a.area)
 
@@ -110,43 +114,43 @@ class ExportTest(g.unittest.TestCase):
         Check to make sure a roundtrip from both a Scene and a
         Path2D results in the same file on both sides
         """
-        p = g.get_mesh('2D/250_cycloidal.DXF')
-        assert isinstance(p, g.trimesh.path.Path2D)
-        # load the exported SVG
-        r = g.trimesh.load(
-            g.trimesh.util.wrap_as_stream(p.export(file_type='svg')),
-            file_type='svg')
-        assert isinstance(r, g.trimesh.path.Path2D)
-        assert g.np.isclose(r.length, p.length)
-        assert g.np.isclose(r.area, p.area)
+        for fn in ['2D/250_cycloidal.DXF', '2D/tray-easy1.dxf']:
+            p = g.get_mesh(fn)
+            assert isinstance(p, g.trimesh.path.Path2D)
+            # load the exported SVG
+            r = g.trimesh.load(
+                g.trimesh.util.wrap_as_stream(
+                    p.export(file_type='svg')),
+                file_type='svg')
+            assert isinstance(r, g.trimesh.path.Path2D)
+            assert g.np.isclose(r.length, p.length)
+            assert g.np.isclose(r.area, p.area)
 
-        assert set(r.metadata.keys()) == set(p.metadata.keys())
+            assert set(r.metadata.keys()) == set(p.metadata.keys())
 
-        s = g.trimesh.scene.split_scene(p)
-        assert isinstance(s, g.trimesh.Scene)
-        r = g.trimesh.load(
-            g.trimesh.util.wrap_as_stream(
-                s.export(file_type='svg')),
-            file_type='svg')
-        assert isinstance(r, g.trimesh.Scene)
-        assert s.metadata == r.metadata
+            s = g.trimesh.scene.split_scene(p)
+            as_svg = s.export(file_type='svg')
+            assert isinstance(s, g.trimesh.Scene)
+            r = g.trimesh.load(
+                g.trimesh.util.wrap_as_stream(as_svg),
+                file_type='svg')
+            assert isinstance(r, g.trimesh.Scene)
+            assert s.metadata == r.metadata
 
-        # check to see if every geometry has the same metadata
-        for geom in s.geometry.keys():
-            a, b = s.geometry[geom], r.geometry[geom]
+            # make sure every geometry name matches exactly
+            assert set(s.geometry.keys()) == set(r.geometry.keys())
 
-            assert a.metadata == b.metadata
+            # check to see if every geometry has the same metadata
+            for geom in s.geometry.keys():
+                a, b = s.geometry[geom], r.geometry[geom]
+                assert a.metadata == b.metadata
+                assert g.np.isclose(a.length, b.length)
+                assert g.np.isclose(a.area, b.area)
+                assert a.body_count == b.body_count
 
-        assert g.np.isclose(
-            sum(i.area for i in s.geometry.values()),
-            sum(i.area for i in r.geometry.values()))
+            assert r.metadata['file_path'].endswith(fn[3:])
 
 
 if __name__ == '__main__':
     g.trimesh.util.attach_to_log()
-
-    import pyinstrument
-    profiler = pyinstrument.Profiler()
-    with profiler:
-        g.unittest.main()
-    print(profiler.output_text())
+    g.unittest.main()

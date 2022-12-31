@@ -70,6 +70,7 @@ class STLTests(g.unittest.TestCase):
     def test_ascii_multibody(self):
         s = g.get_mesh('multibody.stl')
         assert len(s.geometry) == 2
+        assert set(s.geometry.keys()) == {'bodya', 'bodyb'}
 
     def test_empty(self):
         # demo files to check
@@ -84,11 +85,44 @@ class STLTests(g.unittest.TestCase):
             assert not hasattr(e, 'vertices')
 
             # create export
-            export = e.export(file_type='ply')
-            reconstructed = g.wrapload(export, file_type='ply')
-            # export should not contain geometry
-            assert isinstance(reconstructed, g.trimesh.Scene)
-            assert not hasattr(reconstructed, 'vertices')
+            try:
+                e.export(file_type='ply')
+            except BaseException:
+                return
+            raise ValueError("Shouldn't export empty scenes!")
+
+    def test_vertex_order(self):
+        for stl in ['featuretype.STL',
+                    'ADIS16480.STL',
+                    '1002_tray_bottom.STL']:
+            # removing doubles should respect the vertex order
+            m_raw = g.get_mesh(stl, process=False)
+            m_proc = g.get_mesh(stl, process=True,
+                                keep_vertex_order=True)
+
+            verts_raw = g.trimesh.grouping.hashable_rows(m_raw.vertices)
+            verts_proc = g.trimesh.grouping.hashable_rows(m_proc.vertices)
+
+            # go through all processed verts
+            # find index in unprocessed mesh
+            idxs = []
+            for vert in verts_proc:
+                idxs.append(g.np.where(verts_raw == vert)[0][0])
+
+            # indices should be increasing
+            assert (g.np.diff(idxs) > 0).all()
+
+            tris_raw = m_raw.triangles
+            tris_proc = m_proc.triangles
+
+            # of course mesh needs to have same faces as before
+            assert g.np.allclose(
+                g.np.sort(tris_raw, axis=0),
+                g.np.sort(tris_proc, axis=0))
+
+    def test_ascii_keyword(self):
+        m = g.get_mesh('ascii.stl.zip', force='mesh')
+        assert m.is_watertight
 
 
 if __name__ == '__main__':

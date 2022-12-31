@@ -13,6 +13,7 @@ from .geometry import plane_transform
 from .constants import tol
 from .visual.color import VertexColor
 
+
 from . import util
 from . import caching
 from . import grouping
@@ -71,36 +72,49 @@ def plane_fit(points):
 
     Parameters
     ---------
-    points : (n, 3) float
+    points : (n, 3) float or (p, n, 3,) float
       3D points in space
+      Second option allows to simultaneously compute
+      p centroids and normals
 
     Returns
     ---------
-    C : (3,) float
+    C : (3,) float or (p, 3,) float
       Point on the plane
-    N : (3,) float
+    N : (3,) float or (p, 3,) float
       Unit normal vector of plane
     """
     # make sure input is numpy array
     points = np.asanyarray(points, dtype=np.float64)
-    # make the plane origin the mean of the points
-    C = points.mean(axis=0)
-    # points offset by the plane origin
-    x = points - C
-    # create a (3, 3) matrix
-    M = np.dot(x.T, x)
+    assert points.ndim == 2 or points.ndim == 3
+    # with only one point set, np.dot is faster
+    if points.ndim == 2:
+        # make the plane origin the mean of the points
+        C = points.mean(axis=0)
+        # points offset by the plane origin
+        x = points - C[None, :]
+        # create a (3, 3) matrix
+        M = np.dot(x.T, x)
+    else:
+        # make the plane origin the mean of the points
+        C = points.mean(axis=1)
+        # points offset by the plane origin
+        x = points - C[:, None, :]
+        # create a (p, 3, 3) matrix
+        M = np.einsum('pnd, pnm->pdm', x, x)
     # run SVD
-    N = np.linalg.svd(M)[0][:, -1]
-
+    N = np.linalg.svd(M)[0][..., -1]
+    # return the centroid(s) and normal(s)
     return C, N
 
 
 def radial_sort(points,
                 origin,
-                normal):
+                normal,
+                start=None):
     """
     Sorts a set of points radially (by angle) around an
-    an axis specified by origin and normal vector.
+    axis specified by origin and normal vector.
 
     Parameters
     --------------
@@ -110,6 +124,10 @@ def radial_sort(points,
       Origin to sort around
     normal : (3,)  float
       Vector to sort around
+    start : (3,) float
+      Vector to specify start position in counter-clockwise
+      order viewing in direction of normal, MUST not be
+      parallel with normal
 
     Returns
     --------------
@@ -117,19 +135,23 @@ def radial_sort(points,
       Same as input points but reordered
     """
 
-    # create two axis perpendicular to each other and the normal,
-    # and project the points onto them
-    axis0 = [normal[0], normal[2], -normal[1]]
-    axis1 = np.cross(normal, axis0)
-    ptVec = points - origin
-    pr0 = np.dot(ptVec, axis0)
-    pr1 = np.dot(ptVec, axis1)
-
+    # create two axis perpendicular to each other and
+    # the normal and project the points onto them
+    if start is None:
+        axis0 = [normal[0], normal[2], -normal[1]]
+        axis1 = np.cross(normal, axis0)
+    else:
+        normal, start = util.unitize([normal, start])
+        if np.abs(1 - np.abs(np.dot(normal, start))) < tol.zero:
+            raise ValueError('start must not parallel with normal')
+        axis0 = np.cross(start, normal)
+        axis1 = np.cross(axis0, normal)
+    vectors = points - origin
     # calculate the angles of the points on the axis
-    angles = np.arctan2(pr0, pr1)
-
+    angles = np.arctan2(np.dot(vectors, axis0),
+                        np.dot(vectors, axis1))
     # return the points sorted by angle
-    return points[[np.argsort(angles)]]
+    return points[angles.argsort()[::-1]]
 
 
 def project_to_plane(points,
@@ -150,7 +172,7 @@ def project_to_plane(points,
     plane_origin : (3,)
       Origin point of plane
     transform : None or (4, 4) float
-       Homogeneous transform, if specified, normal+origin are overridden
+      Homogeneous transform, if specified, normal+origin are overridden
     return_transform : bool
       Returns the (4, 4) matrix used or not
     return_planar : bool
@@ -396,7 +418,7 @@ class PointCloud(Geometry3D):
           Metadata about points
         """
         self._data = caching.DataStore()
-        self._cache = caching.Cache(self._data.md5)
+        self._cache = caching.Cache(self._data.hash)
         self.metadata = {}
 
         if metadata is not None:
@@ -468,16 +490,16 @@ class PointCloud(Geometry3D):
 
         return copied
 
-    def md5(self):
+    def hash(self):
         """
-        Get an MD5 hash of the current vertices.
+        Get a hash of the current vertices.
 
         Returns
         ----------
-        md5 : str
+        hash : str
           Hash of self.vertices
         """
-        return self._data.md5()
+        return self._data.__hash__()
 
     def crc(self):
         """
@@ -515,8 +537,9 @@ class PointCloud(Geometry3D):
         transform : (4, 4) float
           Homogeneous transformation to apply to PointCloud
         """
-        self.vertices = transformations.transform_points(self.vertices,
-                                                         matrix=transform)
+        self.vertices = transformations.transform_points(
+            self.vertices, matrix=transform)
+        return self
 
     @property
     def bounds(self):
@@ -595,6 +618,22 @@ class PointCloud(Geometry3D):
         self.visual.vertex_colors = data
 
     @caching.cache_decorator
+    def kdtree(self):
+        """
+        Return a scipy.spatial.cKDTree of the vertices of the mesh.
+        Not cached as this lead to observed memory issues and segfaults.
+
+        Returns
+        ---------
+        tree : scipy.spatial.cKDTree
+          Contains mesh.vertices
+        """
+
+        from scipy.spatial import cKDTree
+        tree = cKDTree(self.vertices.view(np.ndarray))
+        return tree
+
+    @caching.cache_decorator
     def convex_hull(self):
         """
         A convex hull of every point.
@@ -645,5 +684,31 @@ class PointCloud(Geometry3D):
                            file_type=file_type,
                            **kwargs)
 
+    def query(self, input_points, **kwargs):
+        """
+        Find the the closest points and associated attributes from this PointCloud.
+        Parameters
+        ------------
+        input_points : (n, 3) float
+          Input query points
+        kwargs : dict
+          Arguments for proximity.query_from_points
+        result : proximity.NearestQueryResult
+            Result of the query.
+        """
+        from .proximity import query_from_points
+        return query_from_points(self.vertices, input_points, self.kdtree, **kwargs)
+
     def __add__(self, other):
-        return PointCloud(vertices=np.vstack((self.vertices, other.vertices)))
+        if len(other.colors) == len(self.colors) == 0:
+            colors = None
+        else:
+            # preserve colors
+            # if one point cloud has no color property use black
+            other_colors = [[0, 0, 0, 255]] * \
+                len(other.vertices) if len(other.colors) == 0 else other.colors
+            self_colors = [[0, 0, 0, 255]] * \
+                len(self.vertices) if len(self.colors) == 0 else self.colors
+            colors = np.vstack((self_colors, other_colors))
+        return PointCloud(vertices=np.vstack(
+            (self.vertices, other.vertices)), colors=colors)

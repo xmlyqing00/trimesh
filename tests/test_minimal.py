@@ -10,6 +10,7 @@ import os
 
 import unittest
 import trimesh
+import numpy as np
 
 # the path of the current directory
 _pwd = os.path.dirname(
@@ -25,6 +26,20 @@ def get_mesh(file_name, **kwargs):
 
 
 class MinimalTest(unittest.TestCase):
+
+    def test_path_exc(self):
+        # this should require *no deps*
+        from trimesh.path import packing
+        (density,
+         offset,
+         inserted,
+         box) = packing.rectangles_single(
+            [[1, 1], [2, 2]],
+            sheet_size=[2, 4])
+        assert inserted.all()
+        assert np.allclose(box, [2, 3])
+        assert offset.shape == (2, 2)
+        assert density > .833
 
     def test_load(self):
         # kinds of files we should be able to
@@ -43,9 +58,38 @@ class MinimalTest(unittest.TestCase):
                 assert len(m.vertices.shape) == 2
 
                 # make sure hash changes
-                initial = m._data.fast_hash()
+                initial = hash(m)
+                m.faces += 0
+
+                assert hash(m) == initial
                 m.vertices[:, 0] += 1.0
-                assert m._data.fast_hash() != initial
+                assert hash(m) != initial
+
+    def test_load_path(self):
+        # should be able to load a path and export it as a GLB
+        # try with a Path3D
+        path = trimesh.load_path(np.asarray([(0, 0, 0), (1, 0, 0), (1, 1, 0)]))
+        assert isinstance(path, trimesh.path.Path3D)
+        scene = trimesh.Scene(path)
+        assert len(scene.geometry) == 1
+        glb = scene.export(file_type='glb')
+        assert len(glb) > 0
+
+        # now create a Path2D
+        path = trimesh.load_path(np.asarray([(0, 0), (1, 0), (1, 1)]))
+        assert isinstance(path, trimesh.path.Path2D)
+
+        # export to an SVG
+        svg = path.export(file_type='svg')
+        assert len(svg) > 0
+
+        dxf = path.export(file_type='dxf')
+        assert len(dxf) > 0
+
+        scene = trimesh.Scene(path)
+        assert len(scene.geometry) == 1
+        glb = scene.export(file_type='glb')
+        assert len(glb) > 0
 
 
 if __name__ == '__main__':

@@ -37,7 +37,8 @@ class PolygonTests(g.unittest.TestCase):
         M = g.np.eye(3)
         M[0][2] = 10.0
         P2 = g.trimesh.path.polygons.transform_polygon(polygon[0], M)
-        distance = g.np.array(P2.centroid) - g.np.array(polygon[0].centroid)
+        distance = g.np.array(P2.centroid.coords)[
+            0] - g.np.array(polygon[0].centroid.coords)[0]
         assert g.np.allclose(distance, [10.0, 0])
 
     def test_random_polygon(self):
@@ -97,6 +98,22 @@ class PolygonTests(g.unittest.TestCase):
         assert g.np.allclose(
             [i.area for i in p], g.np.pi, atol=0.05)
 
+    def test_project_backface(self):
+        m = g.trimesh.Trimesh(
+            vertices=[[0, 0, 0], [0, 1, 0], [1, 0, 0]],
+            faces=[[0, 1, 2]])
+
+        # check ignore_sign argument
+        front = m.projected(m.face_normals[0], ignore_sign=False)
+        assert len(front.entities) == 1
+        front = m.projected(m.face_normals[0], ignore_sign=True)
+        assert len(front.entities) == 1
+
+        back = m.projected(-m.face_normals[0], ignore_sign=False)
+        assert len(back.entities) == 0
+        back = m.projected(-m.face_normals[0], ignore_sign=True)
+        assert len(back.entities) == 1
+
     def test_project_multi(self):
         mesh = (g.trimesh.creation.box() +
                 g.trimesh.creation.box().apply_translation([3, 0, 0]))
@@ -105,6 +122,85 @@ class PolygonTests(g.unittest.TestCase):
         assert mesh.body_count == 2
         assert len(proj.root) == 2
         assert g.np.isclose(proj.area, 2.0)
+
+    def test_second_moment(self):
+        def rectangle(extents):
+            # return the boundary of an origin-centered
+            # rectangle as a numpy array
+            a = g.np.abs(g.np.array(extents) / 2.0)
+            lower, upper = -a, a
+            return g.np.array([lower,
+                               [upper[0], lower[1]],
+                               upper,
+                               [lower[0], upper[1]]])
+
+        def poly(bh, bhi=None):
+            # return a rectangle centered at the origin
+            # as a shapely Polygon
+            shell = rectangle(bh)
+            if bhi is not None:
+                holes = [rectangle(bhi)]
+            else:
+                holes = []
+            return Polygon(shell=shell, holes=holes)
+
+        def truth(bh, bhi=None):
+            # return the analytical second moment of area
+            # for a rectangle with centroid at the origin
+            # and width-height of `bh` and an interior
+            # rectangle width-height of `bhi`
+            if bhi is None:
+                bhi = g.np.zeros(2)
+            b, h = bh
+            bi, hi = bhi
+            return g.np.array([b * h**3 - bi * hi**3,
+                               h * b**3 - hi * bi**3,
+                               0.0], dtype=g.np.float64) / 12
+
+        def truth_corner(bh):
+            # check a rectangle with one corner
+            # at the origin and the rest in positive space
+            b, h = bh
+            return g.np.array([b * h**3,
+                               h * b**3], dtype=g.np.float64) / 3.0
+
+        from trimesh.path.polygons import second_moment
+        from shapely.geometry import Polygon
+        heights = g.np.array([[0.01, 0.01],
+                              [1, 1],
+                              [10, 2],
+                              [3, 21]])
+        for bh in heights:
+            # check the second moment of a rectangle
+            # as both a numpy array and as a Polygon
+            a = second_moment(rectangle(bh))
+            b = second_moment(poly(bh))
+            # check against wikipedia
+            t = truth(bh)
+            assert g.np.allclose(a, b)
+            assert g.np.allclose(a, t)
+
+            # now add some interiors
+            for bhi in heights:
+                # only check if interior is smaller than exterior
+                if not (bhi < bh).all():
+                    continue
+
+                # check a rectangle with interiors
+                c = second_moment(poly(bh, bhi))
+                t = truth(bh, bhi)
+                assert g.np.allclose(c, t)
+
+            # now check a rectangle with the corner
+            # at the origin to see if we've done something
+            # silly with regards to offsets
+            r = rectangle(bh)
+            r += r.min(axis=0)
+            a = second_moment(r)
+            t = truth_corner(bh)
+            # not sure what Ixy is analytically because
+            # wikipedia didn't list it for this case
+            assert g.np.allclose(a[:2], t)
 
 
 if __name__ == '__main__':

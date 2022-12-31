@@ -21,12 +21,11 @@ except BaseException as E:
 
 
 def merge_vertices(mesh,
-                   merge_tex=False,
-                   merge_norm=False,
+                   merge_tex=None,
+                   merge_norm=None,
                    digits_vertex=None,
-                   digits_norm=2,
-                   digits_uv=4,
-                   **kwargs):
+                   digits_norm=None,
+                   digits_uv=None):
     """
     Removes duplicate vertices, grouped by position and
     optionally texture coordinate and normal.
@@ -51,10 +50,18 @@ def merge_vertices(mesh,
     # no vertices so exit early
     if len(mesh.vertices) == 0:
         return
-
-    # use tol.merge if digit precision not passed
-    if not isinstance(digits_vertex, int):
-        digits_vertex = util.decimal_to_digits(tol.merge)
+    if merge_tex is None:
+        merge_tex = False
+    if merge_norm is None:
+        merge_norm = False
+    if digits_norm is None:
+        digits_norm = 2
+    if digits_uv is None:
+        digits_uv = 4
+    if digits_vertex is None:
+        # use tol.merge if digit precision not passed
+        digits_vertex = util.decimal_to_digits(
+            tol.merge)
 
     # if we have a ton of unreferenced vertices it will
     # make the unique_rows call super slow so cull first
@@ -88,7 +95,7 @@ def merge_vertices(mesh,
     stacked = np.column_stack(stacked).round().astype(np.int64)
 
     # check unique rows of referenced vertices
-    u, i = unique_rows(stacked[referenced])
+    u, i = unique_rows(stacked[referenced], keep_order=True)
 
     # construct an inverse using the subset
     inverse = np.zeros(len(mesh.vertices), dtype=np.int64)
@@ -252,7 +259,7 @@ def float_to_int(data, digits=None, dtype=np.int32):
     return as_int
 
 
-def unique_ordered(data):
+def unique_ordered(data, return_index=False, return_inverse=False):
     """
     Returns the same as np.unique, but ordered as per the
     first occurrence of the unique value in data.
@@ -267,9 +274,31 @@ def unique_ordered(data):
     In [3]: trimesh.grouping.unique_ordered(a)
     Out[3]: array([0, 3, 4, 1, 2])
     """
-    data = np.asanyarray(data)
-    order = np.sort(np.unique(data, return_index=True)[1])
-    result = data[order]
+    # uniques are the values, sorted
+    # index is the value in the original `data`
+    # i.e. `data[index] == unique`
+    # inverse is how to re-construct `data` from `unique`
+    # i.e. `unique[inverse] == data`
+    unique, index, inverse = np.unique(
+        data, return_index=True, return_inverse=True)
+
+    # we want to maintain the original index order
+    order = index.argsort()
+
+    if not return_index and not return_inverse:
+        return unique[order]
+
+    # collect return values
+    # start with the unique values in original order
+    result = [unique[order]]
+    # the new index values
+    if return_index:
+        # re-order the index in the original array
+        result.append(index[order])
+    if return_inverse:
+        # create the new inverse from the order of the order
+        result.append(order.argsort()[inverse])
+
     return result
 
 
@@ -368,8 +397,9 @@ def merge_runs(data, digits=None):
     Out[2]: array([-1,  0,  1,  2,  0,  3,  4,  5,  6,  7,  8,  9])
     """
     data = np.asanyarray(data)
-    mask = np.abs(np.diff(data)) > tol.merge
-    mask = np.concatenate((np.array([True]), mask))
+    mask = np.empty(len(data), dtype=bool)
+    mask[0] = True
+    mask[1:] = np.abs(data[1:] - data[:-1]) > tol.merge
 
     return data[mask]
 
@@ -402,7 +432,7 @@ def unique_float(data,
     return tuple(result)
 
 
-def unique_rows(data, digits=None):
+def unique_rows(data, digits=None, keep_order=False):
     """
     Returns indices of unique rows. It will return the
     first occurrence of a row that is duplicated:
@@ -423,13 +453,18 @@ def unique_rows(data, digits=None):
       Array to reconstruct original
       Example: data[unique][inverse] == data
     """
+    # get rows hashable so we can run unique function on it
     rows = hashable_rows(data, digits=digits)
-    _, unique, inverse = np.unique(
-        rows,
-        return_index=True,
-        return_inverse=True)
 
-    return unique, inverse
+    # we are throwing away the first value which is the
+    # garbage row-hash and only returning index and inverse
+    if keep_order:
+        # keeps order of original occurrence
+        return unique_ordered(
+            rows, return_index=True, return_inverse=True)[1:]
+    # returns values sorted by row-hash but since our row-hash
+    # were pretty much garbage the sort order isn't meaningful
+    return np.unique(rows, return_index=True, return_inverse=True)[1:]
 
 
 def unique_value_in_row(data, unique=None):
@@ -733,11 +768,18 @@ def blocks(data,
     """
     data = float_to_int(data, digits=digits)
 
-    # find the inflection points
-    # AKA locations where the array goes from True to False.
-    infl = np.concatenate((
-        [0], np.nonzero(np.diff(data))[0] + 1, [len(data)]))
-    infl_len = np.diff(infl)
+    # keep an integer range around so we can slice
+    arange = np.arange(len(data))
+    arange.flags['WRITEABLE'] = False
+
+    nonzero = arange[1:][data[1:] != data[:-1]]
+    infl = np.zeros(len(nonzero) + 2, dtype=int)
+    infl[-1] = len(data)
+    infl[1:-1] = nonzero
+
+    # the length of each chunk
+    infl_len = infl[1:] - infl[:-1]
+
     # check the length of each group
     infl_ok = np.logical_and(infl_len >= min_len,
                              infl_len <= max_len)
@@ -749,7 +791,7 @@ def blocks(data,
             infl_ok, data[infl[:-1]])
 
     # inflate start/end indexes into full ranges of values
-    blocks = [np.arange(infl[i], infl[i + 1])
+    blocks = [arange[infl[i]:infl[i + 1]]
               for i, ok in enumerate(infl_ok) if ok]
 
     if wrap:

@@ -6,21 +6,35 @@
 Links
 ==========
 .. toctree::
-   Trimesh On Github <http://github.com/mikedh/trimesh>
+   Github <http://github.com/mikedh/trimesh>
 
 Install
 ==========
 .. toctree::
    :maxdepth: 2
 	      
-   install
+   install.md
 
 Examples
 ==========
 .. toctree::
    :maxdepth: 2
 	      
-   examples
+   examples.md
+
+Contributing
+==========  
+.. toctree::
+   :maxdepth: 1
+
+   Contributing <contributing.md>
+
+Docker
+==========  
+.. toctree::
+   :maxdepth: 1
+
+   Docker <docker.md>
 
 API Reference
 =============
@@ -28,3 +42,4 @@ API Reference
    :maxdepth: 1
    
    API Reference <trimesh>
+

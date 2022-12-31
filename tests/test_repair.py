@@ -24,8 +24,8 @@ class RepairTests(g.unittest.TestCase):
                 assert returned == mesh.is_watertight
                 continue
 
-            hashes = [{mesh._data.crc(),
-                       mesh._data.md5(),
+            hashes = [{mesh._data.__hash__(),
+                       mesh._data.__hash__(),
                        mesh._data.fast_hash()}]
 
             mesh.faces = mesh.faces[1:-1]
@@ -36,8 +36,8 @@ class RepairTests(g.unittest.TestCase):
             g.trimesh.repair.broken_faces(
                 mesh, color=[255, 0, 0, 255])
 
-            hashes.append({mesh._data.crc(),
-                           mesh._data.md5(),
+            hashes.append({mesh._data.__hash__(),
+                           mesh._data.__hash__(),
                            mesh._data.fast_hash()})
 
             assert hashes[0] != hashes[1]
@@ -49,8 +49,8 @@ class RepairTests(g.unittest.TestCase):
             assert mesh.is_watertight
             assert mesh.is_winding_consistent
 
-            hashes.append({mesh._data.crc(),
-                           mesh._data.md5(),
+            hashes.append({mesh._data.__hash__(),
+                           mesh._data.__hash__(),
                            mesh._data.fast_hash()})
             assert hashes[1] != hashes[2]
 
@@ -167,6 +167,40 @@ class RepairTests(g.unittest.TestCase):
         assert m.face_normals.shape == m.faces.shape
         m.fix_normals(multibody=True)
         assert g.np.isclose(m.volume, a.volume * 2.0)
+
+    def test_fan(self):
+
+        # start by creating an icosphere and removing
+        # all faces that include a single vertex to make
+        # a nice hole in the mesh
+        m = g.trimesh.creation.icosphere()
+        clip = m.vertex_faces[0]
+        clip = clip[clip >= 0]
+        assert len(clip) > 4
+        mask = g.np.ones(len(m.faces), dtype=bool)
+        mask[clip] = False
+
+        # should have been watertight
+        assert m.is_watertight
+        assert m.is_winding_consistent
+        m.update_faces(mask)
+        # now should not be watertight
+        assert not m.is_watertight
+        assert m.is_winding_consistent
+
+        # create a triangle fan to cover the hole
+        stitch = g.trimesh.repair.stitch(m)
+        # should be an (n, 3) int
+        assert len(stitch.shape) == 2
+        assert stitch.shape[1] == 3
+        assert stitch.dtype.kind == 'i'
+
+        # now check our stitch to see if it handled the hole
+        repair = g.trimesh.Trimesh(
+            vertices=m.vertices.copy(),
+            faces=g.np.vstack((m.faces, stitch)))
+        assert repair.is_watertight
+        assert repair.is_winding_consistent
 
 
 if __name__ == '__main__':

@@ -22,7 +22,7 @@ class PointsTest(g.unittest.TestCase):
         # create a pointcloud object
         cloud = g.trimesh.points.PointCloud(points)
 
-        initial_md5 = cloud.md5()
+        initial_hash = hash(cloud)
 
         assert cloud.convex_hull.volume > 0.0
 
@@ -32,7 +32,7 @@ class PointsTest(g.unittest.TestCase):
         assert cloud.extents.shape == (3,)
         assert cloud.bounds.shape == (2, 3)
 
-        assert cloud.md5() == initial_md5
+        assert hash(cloud) == initial_hash
 
         # set some random colors
         cloud.colors = g.np.random.random((shape[0], 4))
@@ -45,7 +45,7 @@ class PointsTest(g.unittest.TestCase):
         # make sure vertices and colors are new shape
         assert cloud.vertices.shape == new_shape
         assert len(cloud.colors) == new_shape[0]
-        assert cloud.md5() != initial_md5
+        assert hash(cloud) != initial_hash
 
         # AABB volume should be same as points
         assert g.np.isclose(cloud.bounding_box.volume,
@@ -107,9 +107,37 @@ class PointsTest(g.unittest.TestCase):
                                                translate=False)[0]
             # run the plane fit
             C, N = g.trimesh.points.plane_fit(p)
-
             # sign of normal is arbitrary on fit so check both
             assert g.np.allclose(truth, N) or g.np.allclose(truth, -N)
+        # make sure plane fit works with multiple point sets at once
+        nb_points_sets = 20
+        for i in range(10):
+            # create a random rotation
+            matrices = [g.trimesh.transformations.random_rotation_matrix()
+                        for _ in range(nb_points_sets)]
+            # create some random points in spacd
+            p = g.np.random.random((nb_points_sets, 1000, 3))
+            # make them all lie on the XY plane so we know
+            # the correct normal to check against
+            p[..., 2] = 0
+            # transform them into random frame
+            for j, matrix in enumerate(matrices):
+                p[j, ...] = g.trimesh.transform_points(p[j, ...], matrix)
+            # p = g.trimesh.transform_points(p, matrix)
+            # we made the Z values zero before transforming
+            # so the true normal should be Z then rotated
+            truths = g.np.zeros((len(p), 3))
+            for j, matrix in enumerate(matrices):
+                truths[j, :] = g.trimesh.transform_points(
+                    [[0, 0, 1]],
+                    matrix,
+                    translate=False)[0]
+            # run the plane fit
+            C, N = g.trimesh.points.plane_fit(p)
+
+            # sign of normal is arbitrary on fit so check both
+            cosines = g.np.einsum('ij,ij->i', N, truths)
+            assert g.np.allclose(g.np.abs(cosines), g.np.ones_like(cosines))
 
     def test_kmeans(self,
                     cluster_count=5,
@@ -195,12 +223,12 @@ class PointsTest(g.unittest.TestCase):
         assert len(p.vertices) > 0
 
         # initial color CRC
-        initial = p.visual.crc()
+        initial = hash(p.visual)
         # set to random colors
         p.colors = g.np.random.random(
             (len(p.vertices), 4))
         # visual CRC should have changed
-        assert p.visual.crc() != initial
+        assert hash(p.visual) != initial
 
         # test exporting a pointcloud to a PLY file
         r = g.wrapload(p.export(file_type='ply'), file_type='ply')
@@ -224,6 +252,56 @@ class PointsTest(g.unittest.TestCase):
         culled, mask = g.trimesh.points.remove_close(g.np.vstack((p, p)), radius=0.1)
         assert culled.shape == (100, 3)
         assert mask.shape == (200,)
+
+    def test_add_operator(self):
+        points_1 = g.np.random.random((10, 3))
+        points_2 = g.np.random.random((20, 3))
+        colors_1 = [[123, 123, 123, 255]] * len(points_1)
+        colors_2 = [[255, 0, 123, 255]] * len(points_2)
+
+        # Test: Both cloud's colors are preserved
+        cloud_1 = g.trimesh.points.PointCloud(points_1, colors=colors_1)
+        cloud_2 = g.trimesh.points.PointCloud(points_2, colors=colors_2)
+
+        cloud_sum = cloud_1 + cloud_2
+        assert g.np.allclose(
+            cloud_sum.colors, g.np.vstack(
+                (cloud_1.colors, cloud_2.colors)))
+
+        # Next test: Only second cloud has colors
+        cloud_1 = g.trimesh.points.PointCloud(points_1)
+        cloud_2 = g.trimesh.points.PointCloud(points_2, colors=colors_2)
+
+        cloud_sum = cloud_1 + cloud_2
+        assert g.np.allclose(cloud_sum.colors[len(cloud_1.vertices):], cloud_2.colors)
+
+        # Next test: Only first cloud has colors
+        cloud_1 = g.trimesh.points.PointCloud(points_1, colors=colors_1)
+        cloud_2 = g.trimesh.points.PointCloud(points_2)
+
+        cloud_sum = cloud_1 + cloud_2
+        assert g.np.allclose(cloud_sum.colors[:len(cloud_1.vertices)], cloud_1.colors)
+
+    def test_radial_sort(self):
+        theta = g.np.linspace(0.0, g.np.pi * 2.0, 1000)
+        points = g.np.column_stack((
+            g.np.cos(theta),
+            g.np.sin(theta),
+            g.np.zeros(len(theta))))
+        points *= g.random(len(theta)).reshape((-1, 1))
+
+        # apply a random order to the points
+        order = g.np.random.permutation(
+            g.np.arange(len(points)))
+
+        # get the sorted version of these points
+        # when we pass them the randomly ordered points
+        sort = g.trimesh.points.radial_sort(
+            points[order],
+            origin=[0, 0, 0],
+            normal=[0, 0, 1])
+        # should have re-established original order
+        assert g.np.allclose(points, sort)
 
 
 if __name__ == '__main__':

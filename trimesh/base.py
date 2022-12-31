@@ -1,4 +1,3 @@
-# flake8: noqa
 """
 github.com/mikedh/trimesh
 ----------------------------
@@ -15,19 +14,16 @@ from . import sample
 from . import repair
 from . import convex
 from . import remesh
-from . import bounds
 from . import caching
 from . import inertia
-from . import nsphere
 from . import boolean
 from . import grouping
 from . import geometry
 from . import permutate
 from . import proximity
 from . import triangles
-from . import collision
 from . import curvature
-from . import smoothing
+from . import smoothing  # noqa
 from . import comparison
 from . import registration
 from . import decomposition
@@ -42,6 +38,7 @@ from .scene import Scene
 from .parent import Geometry3D
 
 import copy
+import warnings
 import numpy as np
 
 
@@ -59,6 +56,8 @@ class Trimesh(Geometry3D):
                  metadata=None,
                  process=True,
                  validate=False,
+                 merge_tex=None,
+                 merge_norm=None,
                  use_embree=True,
                  initial_cache=None,
                  visual=None,
@@ -104,7 +103,7 @@ class Trimesh(Geometry3D):
         # in the base class all that is stored here is vertex and
         # face information
         # any data put into the store is converted to a TrackedArray
-        # which is a subclass of np.ndarray that provides md5 and crc
+        # which is a subclass of np.ndarray that provides hash and crc
         # methods which can be used to detect changes in the array.
         self._data = caching.DataStore()
 
@@ -113,9 +112,8 @@ class Trimesh(Geometry3D):
         # In order to maintain consistency
         # the cache is cleared when self._data.crc() changes
         self._cache = caching.Cache(
-            id_function=self._data.fast_hash,
+            id_function=self._data.__hash__,
             force_immutable=True)
-
         self._cache.update(initial_cache)
 
         # check for None only to avoid warning messages in subclasses
@@ -189,12 +187,17 @@ class Trimesh(Geometry3D):
         # process will remove NaN and Inf values and merge vertices
         # if validate, will remove degenerate and duplicate faces
         if process or validate:
-            self.process(validate=validate, **kwargs)
+            self.process(validate=validate,
+                         merge_tex=merge_tex,
+                         merge_norm=merge_norm)
 
         # save reference to kwargs
         self._kwargs = kwargs
 
-    def process(self, validate=False, **kwargs):
+    def process(self,
+                validate=False,
+                merge_tex=None,
+                merge_norm=None):
         """
         Do processing to make a mesh useful.
 
@@ -202,8 +205,9 @@ class Trimesh(Geometry3D):
             1) removing NaN and Inf values
             2) merging duplicate vertices
         If validate:
-            3) Remove triangles which have one edge of their rectangular 2D
-               oriented bounding box shorter than tol.merge
+            3) Remove triangles which have one edge
+               of their 2D oriented bounding box
+               shorter than tol.merge
             4) remove duplicated triangles
             5) ensure triangles are consistently wound
                and normals face outwards
@@ -211,7 +215,7 @@ class Trimesh(Geometry3D):
         Parameters
         ------------
         validate : bool
-          If True, remove degenerate and duplicate faces
+          Remove degenerate and duplicate faces.
 
         Returns
         ------------
@@ -225,7 +229,8 @@ class Trimesh(Geometry3D):
         # avoid clearing the cache during operations
         with self._cache:
             self.remove_infinite_values()
-            self.merge_vertices(**kwargs)
+            self.merge_vertices(merge_tex=merge_tex,
+                                merge_norm=merge_norm)
             # if we're cleaning remove duplicate
             # and degenerate faces
             if validate:
@@ -241,54 +246,23 @@ class Trimesh(Geometry3D):
         self.metadata['processed'] = True
         return self
 
-    def md5(self):
-        """
-        An MD5 of the core geometry information for the mesh,
-        faces and vertices.
-
-        Generated from TrackedArray which subclasses np.ndarray to
-        monitor array for changes and returns a correct lazily
-        evaluated md5 so it only has to recalculate the hash
-        occasionally, rather than on every call.
-
-        Returns
-        ----------
-        md5 : string
-          MD5 of everything in the DataStore
-        """
-        md5 = self._data.md5()
-        return md5
-
-    def crc(self):
-        """
-        A zlib.adler32 checksum for the current mesh data.
-
-        This is about 5x faster than an MD5, and the checksum is
-        checked every time something is requested from the cache so
-        it gets called a lot.
-
-        Returns
-        ----------
-        crc : int
-          Checksum of current mesh data
-        """
-        return self._data.fast_hash()
-
     @property
     def faces(self):
         """
         The faces of the mesh.
 
-        This is regarded as core information which cannot be regenerated from
-        cache, and as such is stored in self._data which tracks the array for
-        changes and clears cached values of the mesh if this is altered.
+        This is regarded as core information which cannot be
+        regenerated from cache and as such is stored in
+        `self._data` which tracks the array for changes and
+        clears cached values of the mesh altered.
 
         Returns
         ----------
-        faces : (n, 3) int
-          Representing triangles which reference self.vertices
+        faces : (n, 3) int64
+          References for `self.vertices` for triangles.
         """
-        return self._data.get('faces', np.empty(shape=(0, 3), dtype=np.int64))
+        return self._data.get(
+            'faces', np.empty(shape=(0, 3), dtype=np.int64))
 
     @faces.setter
     def faces(self, values):
@@ -297,7 +271,7 @@ class Trimesh(Geometry3D):
 
         Parameters
         --------------
-        values : (n, 3) int
+        values : (n, 3) int64
           Indexes of self.vertices
         """
         if values is None or len(values) == 0:
@@ -306,8 +280,8 @@ class Trimesh(Geometry3D):
             values = np.asanyarray(values, dtype=np.int64)
 
         # automatically triangulate quad faces
-        if len(values.shape) == 2 and values.shape[1] == 4:
-            log.info('triangulating quad faces')
+        if len(values.shape) == 2 and values.shape[1] != 3:
+            log.info('triangulating faces')
             values = geometry.triangulate_quads(values)
         self._data['faces'] = values
 
@@ -400,16 +374,16 @@ class Trimesh(Geometry3D):
             values, order='C', dtype=np.float64)
         # face normals need to correspond to faces
         if len(values) == 0 or values.shape != self.faces.shape:
-            log.warning('face_normals incorrect shape, ignoring!')
+            log.debug('face_normals incorrect shape, ignoring!')
             return
         # check if any values are larger than tol.merge
         # don't set the normals if they are all zero
         ptp = values.ptp()
         if not np.isfinite(ptp):
-            log.warning('face_normals contain NaN, ignoring!')
+            log.debug('face_normals contain NaN, ignoring!')
             return
         if ptp < tol.merge:
-            log.warning('face_normals all zero, ignoring!')
+            log.debug('face_normals all zero, ignoring!')
             return
 
         # make sure the first few normals match the first few triangles
@@ -495,8 +469,7 @@ class Trimesh(Geometry3D):
             if values.shape == self.vertices.shape:
                 # check to see if they assigned all zeros
                 if values.ptp() < tol.merge:
-                    log.warning(
-                        'vertex_normals are all set to zero!')
+                    log.debug('vertex_normals are all zero!')
                 self._cache['vertex_normals'] = values
 
     @caching.cache_decorator
@@ -534,9 +507,8 @@ class Trimesh(Geometry3D):
         if len(in_mesh) == 0:
             return None
         # get mesh bounds with min and max
-        mesh_bounds = np.array([in_mesh.min(axis=0),
-                                in_mesh.max(axis=0)])
-        return mesh_bounds
+        return np.array([in_mesh.min(axis=0),
+                         in_mesh.max(axis=0)])
 
     @caching.cache_decorator
     def extents(self):
@@ -643,7 +615,8 @@ class Trimesh(Geometry3D):
         Parameters
         -------------
         density : float
-          Specify the density of the mesh to be used in inertia calculations
+          Specify the density of the mesh to be
+          used in inertia calculations.
         """
         self._density = float(value)
         self._cache.delete('mass_properties')
@@ -722,7 +695,7 @@ class Trimesh(Geometry3D):
           Three vectors pointing along the
           principal axis of inertia directions
         """
-        populate = self.principal_inertia_components
+        _ = self.principal_inertia_components
         return self._cache['principal_inertia_vectors']
 
     @caching.cache_decorator
@@ -758,7 +731,7 @@ class Trimesh(Geometry3D):
 
         Returns
         -----------
-        symmetry: None, 'radial', 'spherical'
+        symmetry : None, 'radial', 'spherical'
           What kind of symmetry does the mesh have.
         """
         symmetry, axis, section = inertia.radial_symmetry(self)
@@ -804,7 +777,7 @@ class Trimesh(Geometry3D):
           Points of triangle vertices
         """
         # use of advanced indexing on our tracked arrays will
-        # trigger a change flag which means the MD5 will have to be
+        # trigger a change flag which means the hash will have to be
         # recomputed. We can escape this check by viewing the array.
         triangles = self.vertices.view(np.ndarray)[self.faces]
 
@@ -874,7 +847,7 @@ class Trimesh(Geometry3D):
         edges_face : (n, ) int
           Index of self.faces
         """
-        populate = self.edges
+        _ = self.edges
         return self._cache['edges_face']
 
     @caching.cache_decorator
@@ -923,7 +896,7 @@ class Trimesh(Geometry3D):
         inverse : (len(self.edges), ) int
           Indexes of self.edges_unique
         """
-        populate = self.edges_unique
+        _ = self.edges_unique
         return self._cache['edges_unique_inverse']
 
     @caching.cache_decorator
@@ -1017,7 +990,7 @@ class Trimesh(Geometry3D):
                 [ 6946, 24225]]])
         """
         # make sure we have populated unique edges
-        populate = self.edges_unique
+        _ = self.edges_unique
         # we are relying on the fact that edges are stacked in triplets
         result = self._cache['edges_unique_inverse'].reshape((-1, 3))
         return result
@@ -1088,9 +1061,15 @@ class Trimesh(Geometry3D):
         units._convert_units(self, desired, guess)
         return self
 
-    def merge_vertices(self, **kwargs):
+    def merge_vertices(
+            self,
+            merge_tex=None,
+            merge_norm=None,
+            digits_vertex=None,
+            digits_norm=None,
+            digits_uv=None):
         """
-        Removes duplicate vertices, grouped by position and
+        Removes duplicate vertices grouped by position and
         optionally texture coordinate and normal.
 
         Parameters
@@ -1110,11 +1089,13 @@ class Trimesh(Geometry3D):
         digits_uv : int
           Number of digits to consider for UV coordinates
         """
-        if 'textured' in kwargs:
-            kwargs['merge_tex'] = not kwargs.pop('textured')
-            log.warning(
-                'merge_vertices depreciation: `not textured`->`merge_tex`')
-        grouping.merge_vertices(self, **kwargs)
+        grouping.merge_vertices(
+            mesh=self,
+            merge_tex=merge_tex,
+            merge_norm=merge_norm,
+            digits_vertex=digits_vertex,
+            digits_norm=digits_norm,
+            digits_uv=digits_uv)
 
     def update_vertices(self, mask, inverse=None):
         """
@@ -1291,7 +1272,7 @@ class Trimesh(Geometry3D):
     @caching.cache_decorator
     def face_adjacency(self):
         """
-        Find faces that share an edge, which we call here 'adjacent'.
+        Find faces that share an edge i.e. 'adjacent' faces.
 
         Returns
         ----------
@@ -1330,6 +1311,18 @@ class Trimesh(Geometry3D):
         return adjacency
 
     @caching.cache_decorator
+    def face_neighborhood(self):
+        """
+        Find faces that share a vertex i.e. 'neighbors' faces.
+
+        Returns
+        ----------
+        neighborhood : (n, 2) int
+          Pairs of faces which share a vertex
+        """
+        return graph.face_neighborhood(self)
+
+    @caching.cache_decorator
     def face_adjacency_edges(self):
         """
         Returns the edges that are shared by the adjacent faces.
@@ -1340,7 +1333,7 @@ class Trimesh(Geometry3D):
            Vertex indices which correspond to face_adjacency
         """
         # this value is calculated as a byproduct of the face adjacency
-        populate = self.face_adjacency
+        _ = self.face_adjacency
         return self._cache['face_adjacency_edges']
 
     @caching.cache_decorator
@@ -1446,7 +1439,7 @@ class Trimesh(Geometry3D):
         span : (len(self.face_adjacency), ) float
           Approximate span between the non-shared vertices
         """
-        populate = self.face_adjacency_radius
+        _ = self.face_adjacency_radius
         return self._cache['face_adjacency_span']
 
     @caching.cache_decorator
@@ -1512,7 +1505,8 @@ class Trimesh(Geometry3D):
         [1, 2, 3, 4]
         """
         return graph.neighbors(
-            edges=self.edges_unique, max_index=len(self.vertices))
+            edges=self.edges_unique,
+            max_index=len(self.vertices))
 
     @caching.cache_decorator
     def is_winding_consistent(self):
@@ -1529,7 +1523,7 @@ class Trimesh(Geometry3D):
         if self.is_empty:
             return False
         # consistent winding check is populated into the cache by is_watertight
-        populate = self.is_watertight
+        _ = self.is_watertight
         return self._cache['is_winding_consistent']
 
     @caching.cache_decorator
@@ -1715,7 +1709,7 @@ class Trimesh(Geometry3D):
         origins : (len(self.facets), 3) float
           A point on each facet plane
         """
-        populate = self.facets_normal
+        _ = self.facets_normal
         return self._cache['facets_origin']
 
     @caching.cache_decorator
@@ -1828,9 +1822,10 @@ class Trimesh(Geometry3D):
         cost : float
           Average square distance per point
         """
-        mesh_to_other, cost = registration.mesh_other(mesh=self,
-                                                      other=other,
-                                                      **kwargs)
+        mesh_to_other, cost = registration.mesh_other(
+            mesh=self,
+            other=other,
+            **kwargs)
         return mesh_to_other, cost
 
     def compute_stable_poses(self,
@@ -2003,6 +1998,33 @@ class Trimesh(Geometry3D):
 
         return result
 
+    def subdivide_loop(self, iterations=None):
+        """
+        Subdivide a mesh by dividing each triangle into four
+        triangles and approximating their smoothed surface
+        using loop subdivision. Loop subdivision often looks
+        better on triangular meshes than catmul-clark, which
+        operates primarily on quads.
+
+        Parameters
+        ------------
+        iterations : int
+          Number of iterations to run subdivision.
+        multibody : bool
+          If True will try to subdivide for each submesh
+        """
+        # perform subdivision for one mesh
+        new_vertices, new_faces = remesh.subdivide_loop(
+            vertices=self.vertices,
+            faces=self.faces,
+            iterations=iterations)
+        # create new mesh
+        result = Trimesh(
+            vertices=new_vertices,
+            faces=new_faces,
+            process=False)
+        return result
+
     @log_time
     def smoothed(self, **kwargs):
         """
@@ -2027,7 +2049,7 @@ class Trimesh(Geometry3D):
         """
 
         # smooth should be recomputed if visuals change
-        self.visual._verify_crc()
+        self.visual._verify_hash()
         cached = self.visual._cache['smoothed']
         if cached is not None:
             return cached
@@ -2470,7 +2492,8 @@ class Trimesh(Geometry3D):
         simple : trimesh.Trimesh
           Simplified version of mesh.
         """
-        simple = self.as_open3d.simplify_quadric_decimation(int(face_count))
+        simple = self.as_open3d.simplify_quadric_decimation(
+            int(face_count))
         return Trimesh(vertices=simple.vertices, faces=simple.triangles)
 
     def outline(self, face_ids=None, **kwargs):
@@ -2498,7 +2521,6 @@ class Trimesh(Geometry3D):
         """
         from .path import Path3D
         from .path.exchange.misc import faces_to_path
-        from .exchange.load import load_kwargs
         return Path3D(**faces_to_path(
             self, face_ids, **kwargs))
 
@@ -2506,8 +2528,9 @@ class Trimesh(Geometry3D):
                   normal,
                   **kwargs):
         """
-        Project a mesh onto a plane and then extract the polygon
-        that outlines the mesh projection on that plane.
+        Project a mesh onto a plane and then extract the
+        polygon that outlines the mesh projection on that
+        plane.
 
         Parameters
         ----------
@@ -2533,10 +2556,15 @@ class Trimesh(Geometry3D):
         projected : trimesh.path.Path2D
           Outline of source mesh
         """
+        from .path import Path2D
         from .exchange.load import load_path
         from .path.polygons import projected
 
-        return load_path(projected(mesh=self, normal=normal, **kwargs))
+        projection = projected(
+            mesh=self, normal=normal, **kwargs)
+        if projection is None:
+            return Path2D()
+        return load_path(projection)
 
     @caching.cache_decorator
     def area(self):
@@ -2658,12 +2686,13 @@ class Trimesh(Geometry3D):
 
         Returns
         ---------
-        if append : trimesh.Trimesh object
-        else :      list of trimesh.Trimesh objects
+        submesh : Trimesh or (n,) Trimesh
+          Single mesh if `append` or list of submeshes
         """
-        return util.submesh(mesh=self,
-                            faces_sequence=faces_sequence,
-                            **kwargs)
+        return util.submesh(
+            mesh=self,
+            faces_sequence=faces_sequence,
+            **kwargs)
 
     @caching.cache_decorator
     def identifier(self):
@@ -2673,61 +2702,70 @@ class Trimesh(Geometry3D):
 
         Returns
         -----------
-        identifier : (6, ) float
+        identifier : (7,) float
           Identifying properties of the current mesh
         """
-        identifier = comparison.identifier_simple(self)
-        return identifier
+        return comparison.identifier_simple(self)
 
     @caching.cache_decorator
-    def identifier_md5(self):
+    def identifier_hash(self):
         """
-        An MD5 of the rotation invariant identifier vector
+        A hash of the rotation invariant identifier vector.
 
         Returns
         ---------
         hashed : str
-          MD5 hash of the identifier vector
+          Hex string of the SHA256 hash from
+          the identifier vector at hand-tuned sigfigs.
         """
-        hashed = comparison.identifier_hash(self.identifier)
-        return hashed
+        return comparison.identifier_hash(self.identifier)
+
+    @property
+    def identifier_md5(self):
+        warnings.warn(
+            '`geom.identifier_md5` is deprecated and will ' +
+            'be removed in October 2023: replace ' +
+            'with `geom.identifier_hash`',
+            DeprecationWarning)
+        return self.identifier_hash
 
     def export(self, file_obj=None, file_type=None, **kwargs):
         """
         Export the current mesh to a file object.
         If file_obj is a filename, file will be written there.
 
-        Supported formats are stl, off, ply, collada, json, dict, glb,
-        dict64, msgpack.
+        Supported formats are stl, off, ply, collada, json,
+        dict, glb, dict64, msgpack.
 
         Parameters
         ------------
-        file_obj: open writeable file object
+        file_obj : open writeable file object
           str, file name where to save the mesh
-          None, if you would like this function to return the export blob
-        file_type: str
-          Which file type to export as.
-          If file name is passed this is not required
+          None, return the export blob
+        file_type : str
+          Which file type to export as, if `file_name`
+          is passed this is not required.
         """
-        return export_mesh(mesh=self,
-                           file_obj=file_obj,
-                           file_type=file_type,
-                           **kwargs)
+        return export_mesh(
+            mesh=self,
+            file_obj=file_obj,
+            file_type=file_type,
+            **kwargs)
 
     def to_dict(self):
         """
-        Return a dictionary representation of the current mesh, with keys
-        that can be used as the kwargs for the Trimesh constructor, eg:
-
-        a = Trimesh(**other_mesh.to_dict())
+        Return a dictionary representation of the current mesh
+        with keys that can be used as the kwargs for the
+        Trimesh constructor and matches the schema in:
+        `trimesh/resources/schema/primitive/trimesh.schema.json`
 
         Returns
         ----------
         result : dict
-          With keys that match trimesh constructor
+          Matches schema and Trimesh constructor.
         """
-        result = self.export(file_type='dict')
-        return result
+        return {'vertices': self.vertices.tolist(),
+                'faces': self.faces.tolist()}
 
     def convex_decomposition(self, maxhulls=20, **kwargs):
         """
@@ -2846,10 +2884,7 @@ class Trimesh(Geometry3D):
         contains : (n, ) bool
           Whether or not each point is inside the mesh
         """
-        if not self.is_watertight:
-            log.warning('Mesh is non-watertight for contained point query!')
-        contains = self.ray.contains_points(points)
-        return contains
+        return self.ray.contains_points(points)
 
     @caching.cache_decorator
     def face_angles(self):
@@ -3014,18 +3049,6 @@ class Trimesh(Geometry3D):
         result = eval(statement)
         self._cache[key] = result
         return result
-
-    def __hash__(self):
-        """
-        Return the MD5 hash of the mesh as an integer.
-
-        Returns
-        ----------
-        hashed : int
-          MD5 of mesh data
-        """
-        hashed = int(self.md5(), 16)
-        return hashed
 
     def __add__(self, other):
         """

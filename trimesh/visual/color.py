@@ -58,7 +58,8 @@ class ColorVisuals(Visuals):
         """
         self.mesh = mesh
         self._data = caching.DataStore()
-        self._cache = caching.Cache(id_function=self.crc)
+        self._cache = caching.Cache(
+            id_function=self._data.__hash__)
 
         self.defaults = {
             'material_diffuse': np.array([102, 102, 102, 255],
@@ -122,7 +123,7 @@ class ColorVisuals(Visuals):
             return None
 
         # do bookkeeping
-        self._verify_crc()
+        self._verify_hash()
 
         # check modes in data
         if 'vertex_colors' in self._data:
@@ -132,23 +133,8 @@ class ColorVisuals(Visuals):
 
         return None
 
-    def crc(self):
-        """
-        A checksum for the current visual object and its parent mesh.
-
-        Returns
-        ----------
-        crc : int
-          Checksum of data in visual object and its parent mesh
-        """
-        # will make sure everything has been transferred
-        # to datastore that needs to be before returning crc
-
-        result = self._data.fast_hash()
-        if hasattr(self.mesh, 'crc'):
-            # bitwise xor combines hashes better than a sum
-            result ^= self.mesh.crc()
-        return result
+    def __hash__(self):
+        return self._data.__hash__()
 
     def copy(self):
         """
@@ -161,7 +147,12 @@ class ColorVisuals(Visuals):
           Contains the same information as self
         """
         copied = ColorVisuals()
+        # call the literally insane generators
+        self.face_colors
+        self.vertex_colors
+        # copy anything that's actually data
         copied._data.data = copy.deepcopy(self._data.data)
+
         return copied
 
     @property
@@ -173,7 +164,8 @@ class ColorVisuals(Visuals):
 
         Returns
         ----------
-        colors: (len(mesh.faces), 4) uint8, RGBA color for each face
+        colors : (len(mesh.faces), 4) uint8
+          RGBA color for each face
         """
         return self._get_colors(name='face')
 
@@ -187,10 +179,10 @@ class ColorVisuals(Visuals):
 
         Parameters
         ------------
-        colors: (len(mesh.faces), 3), set each face to the specified color
-                (len(mesh.faces), 4), set each face to the specified color
-                (3,) int, set the whole mesh this color
-                (4,) int, set the whole mesh this color
+        colors : (len(mesh.faces), 3), set each face to the specified color
+                 (len(mesh.faces), 4), set each face to the specified color
+                 (3,) int, set the whole mesh this color
+                 (4,) int, set the whole mesh this color
         """
         if values is None:
             if 'face_colors' in self._data:
@@ -230,10 +222,10 @@ class ColorVisuals(Visuals):
 
         Parameters
         ------------
-        colors: (len(mesh.vertices), 3), set each face to the color
-                (len(mesh.vertices), 4), set each face to the color
-                (3,) int, set the whole mesh this color
-                (4,) int, set the whole mesh this color
+        colors : (len(mesh.vertices), 3), set each face to the color
+                 (len(mesh.vertices), 4), set each face to the color
+                 (3,) int, set the whole mesh this color
+                 (4,) int, set the whole mesh this color
         """
         if values is None:
             if 'vertex_colors' in self._data:
@@ -261,8 +253,7 @@ class ColorVisuals(Visuals):
         self._data['vertex_colors'] = colors
         self._cache.verify()
 
-    def _get_colors(self,
-                    name):
+    def _get_colors(self, name):
         """
         A magical function which maintains the sanity of vertex and face colors.
 
@@ -271,18 +262,20 @@ class ColorVisuals(Visuals):
         when requested.
         * If colors have never been set, a (count,4) tiled copy of the default diffuse
         color will be stored in the cache
-        ** the CRC on creation for these cached default colors will also be stored
-        ** if the cached color array is altered (different CRC than when it was
+        ** the hash on creation for these cached default colors will also be stored
+        ** if the cached color array is altered (different hash than when it was
         created) we consider that now to be user data and the array is moved from
         the cache to the DataStore.
 
         Parameters
         -----------
-        name: str, 'face', or 'vertex'
+        name : str
+          Values 'face' or 'vertex'
 
         Returns
         -----------
-        colors: (count, 4) uint8, RGBA colors
+        colors : (count, 4) uint8
+          RGBA colors
         """
 
         count = None
@@ -296,8 +289,8 @@ class ColorVisuals(Visuals):
 
         # the face or vertex colors
         key_colors = str(name) + '_colors'
-        # the initial crc of the
-        key_crc = key_colors + '_crc'
+        # the initial hash of the colors
+        key_hash = key_colors + '_hash'
 
         if key_colors in self._data:
             # if a user has explicitly stored or changed the color it
@@ -310,7 +303,7 @@ class ColorVisuals(Visuals):
             colors = self._cache[key_colors]
             # if the cached colors have been changed since creation we move
             # them to data
-            if colors.crc() != self._cache[key_crc]:
+            if hash(colors) != self._cache[key_hash]:
                 # call the setter on the property using exec
                 # this avoids having to pass a setter to this function
                 if name == 'face':
@@ -346,15 +339,15 @@ class ColorVisuals(Visuals):
                 colors.shape != (count, 4)):
             raise ValueError('face colors incorrect shape!')
 
-        # subclass the array to track for changes using a CRC
+        # subclass the array to track for changes using a hash
         colors = caching.tracked_array(colors)
         # put the generated colors and their initial checksum into cache
         self._cache[key_colors] = colors
-        self._cache[key_crc] = colors.crc()
+        self._cache[key_hash] = hash(colors)
 
         return colors
 
-    def _verify_crc(self):
+    def _verify_hash(self):
         """
         Verify the checksums of cached face and vertex color, to verify
         that a user hasn't altered them since they were generated from
@@ -370,8 +363,8 @@ class ColorVisuals(Visuals):
         for name in ['face', 'vertex']:
             # the face or vertex colors
             key_colors = str(name) + '_colors'
-            # the initial crc of the
-            key_crc = key_colors + '_crc'
+            # the initial hash of the colors
+            key_hash = key_colors + '_hash'
 
             if key_colors not in self._cache:
                 continue
@@ -379,7 +372,7 @@ class ColorVisuals(Visuals):
             colors = self._cache[key_colors]
             # if the cached colors have been changed since creation
             # move them to data
-            if colors.crc() != self._cache[key_crc]:
+            if hash(colors) != self._cache[key_hash]:
                 if name == 'face':
                     self.face_colors = colors
                 elif name == 'vertex':
@@ -462,7 +455,8 @@ class ColorVisuals(Visuals):
 
     def concatenate(self, other, *args):
         """
-        Concatenate two or more ColorVisuals objects into a single object.
+        Concatenate two or more ColorVisuals objects
+        into a single object.
 
         Parameters
         -----------
@@ -472,8 +466,9 @@ class ColorVisuals(Visuals):
 
         Returns
         -----------
-        result: ColorVisuals object containing information from current
-                object and others in the order it was passed.
+        result : ColorVisuals
+          Containing information from current
+          object and others in the order it was passed.
         """
         # avoid a circular import
         from . import objects
@@ -512,9 +507,6 @@ class VertexColor(Visuals):
     def kind(self):
         return 'vertex'
 
-    def crc(self):
-        return self._colors.crc()
-
     def update_vertices(self, mask):
         if self._colors is not None:
             self._colors = self._colors[mask]
@@ -546,7 +538,8 @@ class VertexColor(Visuals):
 
     def concatenate(self, other):
         """
-        Concatenate this visual object with another VertexVisuals.
+        Concatenate this visual object with another
+        VertexVisuals.
 
         Parameters
         -----------
@@ -561,6 +554,9 @@ class VertexColor(Visuals):
         return VertexColor(colors=np.vstack(
             self.vertex_colors,
             other.vertex_colors))
+
+    def __hash__(self):
+        return self._colors.__hash__()
 
 
 def to_rgba(colors, dtype=np.uint8):
@@ -891,6 +887,66 @@ def uv_to_color(uv, image):
     # access colors from pixel locations
     # make sure image is RGBA before getting values
     colors = np.asanyarray(image.convert('RGBA'))[y, x]
+
+    # conversion to RGBA should have corrected shape
+    assert colors.ndim == 2 and colors.shape[1] == 4
+
+    return colors
+
+
+def uv_to_interpolated_color(uv, image):
+    """
+    Get the color from texture image using bilinear sampling.
+
+    Parameters
+    -------------
+    uv : (n, 2) float
+      UV coordinates on texture image
+    image : PIL.Image
+      Texture image
+
+    Returns
+    ----------
+    colors : (n, 4) float
+      RGBA color at each of the UV coordinates
+    """
+    if image is None or uv is None:
+        return None
+
+    # UV coordinates should be (n, 2) float
+    uv = np.asanyarray(uv, dtype=np.float64)
+
+    # get texture image pixel positions of UV coordinates
+    x = (uv[:, 0] * (image.width - 1))
+    y = ((1 - uv[:, 1]) * (image.height - 1))
+
+    x_floor = np.floor(x).astype(np.int64) % image.width
+    y_floor = np.floor(y).astype(np.int64) % image.height
+
+    x_ceil = np.ceil(x).astype(np.int64) % image.width
+    y_ceil = np.ceil(y).astype(np.int64) % image.height
+
+    dx = x % image.width - x_floor
+    dy = y % image.height - y_floor
+
+    img = np.asanyarray(image.convert('RGBA'))
+
+    colors00 = img[y_floor, x_floor]
+    colors01 = img[y_ceil, x_floor]
+    colors10 = img[y_floor, x_ceil]
+    colors11 = img[y_ceil, x_ceil]
+
+    a00 = (1 - dx) * (1 - dy)
+    a01 = dx * (1 - dy)
+    a10 = (1 - dx) * dy
+    a11 = dx * dy
+
+    a00 = np.repeat(a00[:, None], 4, axis=1)
+    a01 = np.repeat(a01[:, None], 4, axis=1)
+    a10 = np.repeat(a10[:, None], 4, axis=1)
+    a11 = np.repeat(a11[:, None], 4, axis=1)
+
+    colors = a00 * colors00 + a01 * colors01 + a10 * colors10 + a11 * colors11
 
     # conversion to RGBA should have corrected shape
     assert colors.ndim == 2 and colors.shape[1] == 4

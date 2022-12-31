@@ -202,6 +202,7 @@ def merge_colinear(points, scale):
     # and direction vectors A-B, B-C, etc
     # these will be perpendicular to the vectors A-C, B-D, etc
     perp = (points[2:] - points[:-2]).T[::-1].T
+    perp[:, 0] *= -1
     perp_norm = util.row_norm(perp)
     perp_nonzero = perp_norm > tol.merge
     perp[perp_nonzero] /= perp_norm[perp_nonzero].reshape((-1, 1))
@@ -321,9 +322,9 @@ def simplify_basic(drawing, process=False, **kwargs):
       Original path but with some closed line-loops converted to circles
     """
 
-    if any(i.__class__.__name__ != 'Line'
-           for i in drawing.entities):
-        log.debug('Path contains non- linear entities, skipping')
+    if any(entity.__class__.__name__ != 'Line'
+           for entity in drawing.entities):
+        log.debug('Skipping path containing entities other than `Line`')
         return drawing
 
     # we are going to do a bookkeeping to avoid having

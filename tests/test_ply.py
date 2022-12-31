@@ -63,7 +63,7 @@ class PlyTest(g.unittest.TestCase):
         """
         m = g.get_mesh('points_ascii_with_lists.ply')
 
-        point_list = m.metadata['ply_raw']['point_list']['data']
+        point_list = m.metadata['_ply_raw']['point_list']['data']
         assert g.np.array_equal(
             point_list['point_indices1'][0], g.np.array([10, 11, 12], dtype=g.np.uint32))
         assert g.np.array_equal(
@@ -91,7 +91,7 @@ class PlyTest(g.unittest.TestCase):
         reconstructed = g.wrapload(export,
                                    file_type='ply')
 
-        vertex_attributes = reconstructed.metadata['ply_raw']['vertex']['data']
+        vertex_attributes = reconstructed.metadata['_ply_raw']['vertex']['data']
         result_1d = vertex_attributes['test_1d_attribute']
         result_nd = vertex_attributes['test_nd_attribute']['f1']
 
@@ -111,7 +111,7 @@ class PlyTest(g.unittest.TestCase):
         export = m.export(file_type='ply')
         reconstructed = g.wrapload(export, file_type='ply')
 
-        face_attributes = reconstructed.metadata['ply_raw']['face']['data']
+        face_attributes = reconstructed.metadata['_ply_raw']['face']['data']
         result_1d = face_attributes['test_1d_attribute']
         result_nd = face_attributes['test_nd_attribute']['f1']
 
@@ -160,19 +160,18 @@ class PlyTest(g.unittest.TestCase):
 
         for empty_file in empty_files:
             e = g.get_mesh('emptyIO/' + empty_file)
-
-            # create export
-            export = e.export(file_type='ply')
-            reconstructed = g.wrapload(export, file_type='ply')
-
             if 'empty' in empty_file:
-                # result should be an empty scene without vertices
-                assert isinstance(e, g.trimesh.Scene)
-                assert not hasattr(e, 'vertices')
-                # export should not contain geometry
-                assert isinstance(reconstructed, g.trimesh.Scene)
-                assert not hasattr(reconstructed, 'vertices')
+                # result should be an empty scene
+                try:
+                    e.export(file_type='ply')
+                except BaseException:
+                    continue
+                raise ValueError('should not export empty')
             elif 'points' in empty_file:
+                # create export
+                export = e.export(file_type='ply')
+                reconstructed = g.wrapload(export, file_type='ply')
+
                 # result should be a point cloud instance
                 assert isinstance(e, g.trimesh.PointCloud)
                 assert hasattr(e, 'vertices')
@@ -204,6 +203,13 @@ class PlyTest(g.unittest.TestCase):
         m2 = g.get_mesh('plane_tri.ply')
         assert m1.faces.shape == (2, 3)
         assert m2.faces.shape == (2, 3)
+
+    def test_texturefile(self):
+        # try loading a PLY with texture
+        m = g.get_mesh('fuze.ply')
+        # run the checks to make sure fuze has the
+        # correct number of vertices and has texture loaded
+        g.check_fuze(m)
 
 
 if __name__ == '__main__':

@@ -22,6 +22,7 @@ import itertools
 import contextlib
 import subprocess
 import collections
+import numpy as np
 
 import trimesh
 
@@ -31,18 +32,26 @@ from collections import deque
 from copy import deepcopy
 
 
-from distutils.spawn import find_executable
-
-try:
+if sys.version_info >= (3, 1):
     # Python 3
     from http.server import SimpleHTTPRequestHandler
     import socketserver
-except ImportError:
+
+    from pyinstrument import Profiler
+
+else:
     # Python 2
     from SimpleHTTPServer import SimpleHTTPRequestHandler
     import SocketServer as socketserver
 
-import numpy as np
+    # make a dummy profiler
+    class Profiler(object):
+        def __enter__(*args, **kwargs):
+            pass
+
+        def __exit__(*args, **kwargs):
+            pass
+
 
 # should we require all soft dependencies
 # this is set in the docker images to catch missing packages
@@ -59,12 +68,26 @@ except ImportError as E:
         raise E
     sp = None
 
+try:
+    import jsonschema
+except BaseException as E:
+    jsonschema = trimesh.exceptions.ExceptionModule(E)
+
 # make sure functions know they should run additional
 # potentially slow validation checks and raise exceptions
 trimesh.util._STRICT = True
 trimesh.constants.tol.strict = True
 trimesh.constants.tol_path.strict = True
 
+
+try:
+    from mapbox_earcut import triangulate_float64
+    has_earcut = True
+except BaseException as E:
+    if all_dep:
+        raise E
+    else:
+        has_earcut = False
 
 try:
     from shapely.geometry import Point, Polygon, LineString
@@ -467,7 +490,7 @@ data = _load_data()
 
 # find executables to run with subprocess
 # formats supported by meshlab for export tests
-if any(find_executable(i) is None
+if any(trimesh.util.which(i) is None
        for i in ['xfvb-run', 'meshlabserver']):
     meshlab_formats = []
 else:

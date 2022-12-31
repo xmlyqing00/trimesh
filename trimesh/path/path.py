@@ -8,8 +8,10 @@ those stored in a DXF or SVG file.
 import numpy as np
 
 import copy
-import hashlib
+import warnings
 import collections
+
+from hashlib import sha256
 
 from ..points import plane_fit
 from ..geometry import plane_transform
@@ -29,23 +31,35 @@ from .. import exceptions
 from .. import transformations as tf
 
 from . import raster
-from . import repair
 from . import simplify
 from . import creation  # NOQA
-from . import polygons
 from . import segments  # NOQA
 from . import traversal
 
 from .exchange.export import export_path
 
-from scipy.spatial import cKDTree
-from shapely.geometry import Polygon
-
+# now import things which require non-minimal install of Trimesh
+# create a dummy module which will raise the ImportError
+# or other exception only when someone tries to use that function
+try:
+    from . import repair
+except BaseException as E:
+    repair = exceptions.ExceptionModule(E)
+try:
+    from . import polygons
+except BaseException as E:
+    polygons = exceptions.ExceptionModule(E)
+try:
+    from scipy.spatial import cKDTree
+except BaseException as E:
+    cKDTree = exceptions.closure(E)
+try:
+    from shapely.geometry import Polygon
+except BaseException as E:
+    Polygon = exceptions.closure(E)
 try:
     import networkx as nx
 except BaseException as E:
-    # create a dummy module which will raise the ImportError
-    # or other exception only when someone tries to use networkx
     nx = exceptions.ExceptionModule(E)
 
 
@@ -93,7 +107,8 @@ class Path(parent.Geometry):
             self.metadata.update(metadata)
 
         # cache will dump whenever self.crc changes
-        self._cache = caching.Cache(id_function=self.crc)
+        self._cache = caching.Cache(
+            id_function=self.__hash__)
 
         if process:
             # literally nothing will work if vertices
@@ -159,20 +174,6 @@ class Path(parent.Geometry):
         for c, e in zip(colors, self.entities):
             e.color = c
 
-    def colors_crc(self):
-        """
-        A CRC of the current entity colors.
-
-        Returns
-        -------
-        crc : int
-          CRC of the current entity colors
-        """
-        # first CRC the colors in every entity
-        target = caching.crc32(bytes().join(
-            e.color.tobytes() for e in self.entities))
-        return target
-
     @property
     def vertices(self):
         return self._vertices
@@ -214,38 +215,21 @@ class Path(parent.Geometry):
         # layer is a required meta-property for entities
         return [e.layer for e in self.entities]
 
-    def crc(self):
+    def __hash__(self):
         """
-        A CRC of the current vertices and entities.
+        A hash of the current vertices and entities.
 
         Returns
         ------------
-        crc : int
-          CRC of entity points and vertices
+        hash : long int
+          Appended hashes
         """
-        # first CRC the points in every entity
-        target = caching.crc32(bytes().join(
-            e._bytes() for e in self.entities))
-        # XOR the CRC for the vertices
-        target ^= self.vertices.fast_hash()
-        return target
-
-    def md5(self):
-        """
-        An MD5 hash of the current vertices and entities.
-
-        Returns
-        ------------
-        md5 : str
-          Appended MD5 hashes
-        """
-        # first MD5 the points in every entity
-        target = '{}{}'.format(
-            hashlib.md5(bytes().join(
-                e._bytes() for e in self.entities)).hexdigest(),
-            self.vertices.md5())
-
-        return target
+        # get the hash of the trackedarray vertices
+        hashable = [hex(self.vertices.__hash__()).encode('utf-8')]
+        # get the bytes for each entity
+        hashable.extend(e._bytes() for e in self.entities)
+        # hash the combined result
+        return caching.hash_fast(b''.join(hashable))
 
     @caching.cache_decorator
     def paths(self):
@@ -257,8 +241,8 @@ class Path(parent.Geometry):
         paths : (n,) sequence of (*,) int
           Referencing self.entities
         """
-        paths = traversal.closed_paths(self.entities,
-                                       self.vertices)
+        paths = traversal.closed_paths(
+            self.entities, self.vertices)
         return paths
 
     @caching.cache_decorator
@@ -501,7 +485,7 @@ class Path(parent.Geometry):
             raise ValueError('transform is incorrect shape!')
         elif np.abs(transform - np.eye(dimension + 1)).max() < 1e-8:
             # if we've been passed an identity matrix do nothing
-            return
+            return self
 
         # make sure cache is up to date
         self._cache.verify()
@@ -907,7 +891,7 @@ class Path3D(Path):
                     N *= np.sign(np.dot(N, normal))
                     N = normal
                 else:
-                    log.warning(
+                    log.debug(
                         "passed normal not used: {}".format(
                             normal.shape))
             # create a transform from fit plane to XY
@@ -1445,7 +1429,7 @@ class Path2D(Path):
 
             fmt = eformat[e_key].copy()
             if color is not None:
-                # passed color will override other optons
+                # passed color will override other options
                 fmt['color'] = color
             elif hasattr(entity, 'color'):
                 # if entity has specified color use it
@@ -1464,23 +1448,36 @@ class Path2D(Path):
         identifier : (5,) float
           Unique identifier
         """
-        if len(self.polygons_full) != 1:
-            raise TypeError('Identifier only valid for single body')
-        return polygons.polygon_hash(self.polygons_full[0])
+        hasher = polygons.polygon_hash
+        target = self.polygons_full
+        if len(target) == 1:
+            return hasher(self.polygons_full[0])
+        elif len(target) == 0:
+            return np.zeros(5)
+
+        return np.sum([hasher(p) for p in target], axis=1)
 
     @caching.cache_decorator
-    def identifier_md5(self):
+    def identifier_hash(self):
         """
-        Return an MD5 of the identifier.
+        Return a hash of the identifier.
 
         Returns
         ----------
-        hashed : str
-          Hashed identifier.
+        hashed : (64,) str
+          SHA256 hash of the identifier vector.
         """
         as_int = (self.identifier * 1e4).astype(np.int64)
-        hashed = hashlib.md5(as_int.tobytes(order='C')).hexdigest()
-        return hashed
+        return sha256(as_int.tobytes(order='C')).hexdigest()
+
+    @property
+    def identifier_md5(self):
+        warnings.warn(
+            '`geom.identifier_md5` is deprecated and will ' +
+            'be removed in October 2023: replace ' +
+            'with `geom.identifier_hash`',
+            DeprecationWarning)
+        return self.identifier_hash
 
     @property
     def path_valid(self):

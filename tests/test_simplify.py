@@ -11,20 +11,20 @@ class SimplifyTest(g.unittest.TestCase):
         # loading the polygon will make all arcs discrete
         path = g.trimesh.load_path(polygon)
 
-        # save the md5 before doing operations
-        md5_pre = g.deepcopy(path.md5())
+        # save the hash before doing operations
+        hash_pre = g.deepcopy(path.__hash__())
 
         # this should return a copy of the path
         simplified = path.simplify()
 
         # make sure the simplify call didn't alter our original mesh
-        assert path.md5() == md5_pre
+        assert path.__hash__() == hash_pre
 
         for garbage in range(2):
             # the simplified version shouldn't have lost area
             assert g.np.allclose(path.area,
                                  simplified.area,
-                                 rtol=1e-3)
+                                 rtol=1e-2)
 
             # see if we fit as many arcs as existed in the original drawing
             new_count = sum(int(type(i).__name__ == 'Arc')
@@ -43,7 +43,7 @@ class SimplifyTest(g.unittest.TestCase):
             simplified._cache.clear()
 
         # make sure the simplify call didn't alter our original mesh
-        assert path.md5() == md5_pre
+        assert path.__hash__() == hash_pre
 
     def test_simplify(self):
 
@@ -86,6 +86,17 @@ class SimplifyTest(g.unittest.TestCase):
         # check the kwargs
         simple = path_2D.simplify_spline(smooth=0.01)
         assert g.np.isclose(path_2D.area, simple.area, rtol=.01)
+
+    def test_merge_colinear(self):
+        num = 100
+        dists = g.np.linspace(0, 1000, num=num)
+        direction = g.trimesh.unitize([1, g.np.random.rand()])
+        points = direction * dists.reshape((-1, 1))
+        merged = g.trimesh.path.simplify.merge_colinear(points, scale=1000)
+        print('direction:', direction)
+        print('points:', points.shape)
+        print('merged:', merged.shape)
+        assert merged.shape[0] == 2
 
 
 if __name__ == '__main__':

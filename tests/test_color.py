@@ -221,6 +221,27 @@ class VisualTest(g.unittest.TestCase):
 
         g.np.testing.assert_allclose(colors, colors_expected, rtol=0, atol=0)
 
+    def test_uv_to_interpolated_color(self):
+        try:
+            import PIL.Image
+        except ImportError:
+            return
+
+        uv = g.np.array([[0.25, 0.2], [0.4, 0.5]], dtype=float)
+
+        tmp = g.np.arange(32)
+        x, y = g.np.meshgrid(tmp, tmp)
+        z = x + 128
+
+        texture = g.np.stack([x, y, z], axis=-1).astype(g.np.uint8)
+
+        img = PIL.Image.fromarray(texture)
+        colors = g.trimesh.visual.uv_to_interpolated_color(uv, img)
+        colors_expected = [[7.75, 24.8, 128 + 7.75, 255],
+                           [12.4, 15.5, 128 + 12.4, 255]]
+
+        g.np.testing.assert_allclose(colors, colors_expected, rtol=0, atol=0.1)
+
     def test_iterset(self):
         m = g.trimesh.creation.box()
         color = [100, 0, 0, 200]
@@ -233,6 +254,19 @@ class VisualTest(g.unittest.TestCase):
             m.visual.face_colors[f] = color
 
         assert g.np.allclose(m.visual.face_colors, color)
+
+    def test_copy(self):
+        s = g.trimesh.creation.uv_sphere().scene()
+        s.geometry['geometry_0'].visual.face_colors[:, :3] = [0, 255, 0]
+
+        a = s.geometry['geometry_0']
+        assert id(a) == id(s.geometry['geometry_0'])
+
+        b = s.geometry['geometry_0'].copy()
+        assert id(a) != id(b)
+
+        assert g.np.allclose(a.visual.face_colors,
+                             b.visual.face_colors)
 
 
 if __name__ == '__main__':

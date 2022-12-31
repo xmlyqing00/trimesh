@@ -4,15 +4,11 @@ except BaseException:
     import generic as g
 
 
-def random_chr():
-    return chr(ord('a') + int(round(g.np.random.random() * 25)))
-
-
 class SceneTests(g.unittest.TestCase):
 
     def test_scene(self):
-        for mesh in g.get_mesh('cycloidal.ply',
-                               'sphere.ply'):
+        for file_name in ['cycloidal.ply', 'sphere.ply']:
+            mesh = g.get_mesh(file_name)
             if mesh.units is None:
                 mesh.units = 'in'
 
@@ -20,27 +16,28 @@ class SceneTests(g.unittest.TestCase):
             scene_split.convert_units('in')
             scene_base = g.trimesh.Scene(mesh)
 
-            # save MD5 of scene before concat
-            pre = [scene_split.md5(), scene_base.md5()]
-            # make sure MD5's give the same result twice
-            assert scene_split.md5() == pre[0]
-            assert scene_base.md5() == pre[1]
+            # save hash of scene before concat
+            pre = [scene_split.__hash__(), scene_base.__hash__()]
+            # make sure hash's give the same result twice
+            assert scene_split.__hash__() == pre[0]
+            assert scene_base.__hash__() == pre[1]
 
-            assert isinstance(scene_base.crc(), int)
+            # __hash__ is a long int which fails isinstance in Python 2
+            assert type(scene_base.__hash__()).__name__ in ('int', 'long')
 
             # try out scene appending
             concat = scene_split + scene_base
 
             # make sure concat didn't mess with original scenes
-            assert scene_split.md5() == pre[0]
-            assert scene_base.md5() == pre[1]
+            assert scene_split.__hash__() == pre[0]
+            assert scene_base.__hash__() == pre[1]
 
             # make sure concatenate appended things, stuff
             assert len(concat.geometry) == (len(scene_split.geometry) +
                                             len(scene_base.geometry))
 
             for s in [scene_split, scene_base]:
-                pre = s.md5()
+                pre = s.__hash__()
                 assert len(s.geometry) > 0
                 assert s.is_valid
 
@@ -56,8 +53,8 @@ class SceneTests(g.unittest.TestCase):
                 assert g.trimesh.util.is_shape(s.triangles, (-1, 3, 3))
                 assert len(s.triangles) == len(s.triangles_node)
 
-                assert s.md5() == pre
-                assert s.md5() is not None
+                assert s.__hash__() == pre
+                assert s.__hash__() is not None
 
                 # should be some duplicate nodes
                 assert len(s.duplicate_nodes) > 0
@@ -107,12 +104,11 @@ class SceneTests(g.unittest.TestCase):
                 s.explode()
 
     def test_scaling(self):
-        """
-        Test the scaling of scenes including unit conversion.
-        """
+        # Test the scaling of scenes including unit conversion.
+
         scene = g.get_mesh('cycloidal.3DXML')
 
-        md5 = scene.md5()
+        hash_val = scene.__hash__()
         extents = scene.bounding_box_oriented.primitive.extents.copy()
 
         # TODO: have OBB return sorted extents
@@ -133,8 +129,8 @@ class SceneTests(g.unittest.TestCase):
         assert scene.bounding_primitive.volume > 0.0
 
         # we shouldn't have modified the original scene
-        assert scene.md5() == md5
-        assert scaled.md5() != md5
+        assert scene.__hash__() == hash_val
+        assert scaled.__hash__() != hash_val
 
         # 3DXML comes in as mm
         assert all(m.units == 'mm'
@@ -160,8 +156,49 @@ class SceneTests(g.unittest.TestCase):
         assert scene.units == 'mm'
 
         # we shouldn't have modified the original scene
-        assert scene.md5() == md5
-        assert converted.md5() != md5
+        assert scene.__hash__() == hash_val
+        assert converted.__hash__() != hash_val
+
+    def test_scaling_3D(self):
+        scene = g.get_mesh('cycloidal.3DXML')
+        extents = scene.extents.copy()
+
+        factor = [0.2, 1.3, 3.3]
+        scaled = scene.scaled(factor)
+
+        assert g.np.allclose(
+            scaled.extents /
+            extents,
+            factor)
+
+        factor = [3.0, 3.0, 3.0]
+        scaled = scene.scaled(factor)
+
+        assert g.np.allclose(
+            scaled.extents /
+            extents,
+            factor)
+
+    def test_scaling_3D_mixed(self):
+        # same as test_scaling_3D but input scene contains 2D and 3D geometry
+        scene = g.get_mesh('scenes.zip', mixed=True)
+        extents = scene.extents.copy()
+
+        factor = [0.2, 1.3, 3.3]
+        scaled = scene.scaled(factor)
+
+        assert g.np.allclose(
+            scaled.extents /
+            extents,
+            factor)
+
+        factor = [3.0, 3.0, 3.0]
+        scaled = scene.scaled(factor)
+
+        assert g.np.allclose(
+            scaled.extents /
+            extents,
+            factor)
 
     def test_add_geometry(self):
         # list-typed geometry should create multiple nodes,
@@ -203,7 +240,9 @@ class SceneTests(g.unittest.TestCase):
         [s.graph[n] for n in s.graph.nodes]
 
     def test_dupe(self):
-        m = g.get_mesh('tube.obj')
+        m = g.get_mesh('tube.obj',
+                       merge_norm=True,
+                       merge_tex=True)
 
         assert m.body_count == 1
 
@@ -296,14 +335,13 @@ class SceneTests(g.unittest.TestCase):
         assert len(n) == 0
 
     def test_zipped(self):
-        """
-        Make sure a zip file with multiple file types
-        is returned as a single scene.
-        """
+        # Make sure a zip file with multiple file types
+        # is returned as a single scene.
+
         # allow mixed 2D and 3D geometry
         m = g.get_mesh('scenes.zip', mixed=True)
-
         assert len(m.geometry) >= 6
+
         assert len(m.graph.nodes_geometry) >= 10
         assert any(isinstance(i, g.trimesh.path.Path2D)
                    for i in m.geometry.values())
@@ -331,6 +369,7 @@ class SceneTests(g.unittest.TestCase):
         # duplicate node groups should be twice as long
         set_ori = set([len(i) * 2 for i in s.duplicate_nodes])
         set_dbl = set([len(i) for i in r.duplicate_nodes])
+
         assert set_ori == set_dbl
 
     def test_empty_scene(self):
@@ -371,6 +410,53 @@ class SceneTests(g.unittest.TestCase):
         # make sure our flag does something
         s = g.get_mesh('box.obj', group_material=False)
         assert set(s.geometry.keys()) != {'Material', 'SecondMaterial'}
+
+    def test_strip(self):
+        m = g.get_mesh('cycloidal.3DXML')
+        assert any(g.visual.kind is not None
+                   for g in m.geometry.values())
+        m.strip_visuals()
+        assert all(g.visual.kind is None
+                   for g in m.geometry.values())
+
+    def test_export_concat(self):
+        # Scenes exported in mesh formats should be
+        # concatenating the meshes somewhere.
+        original = g.trimesh.creation.icosphere(
+            radius=0.123312)
+        original_hash = original.identifier_hash
+
+        scene = g.trimesh.Scene()
+        scene.add_geometry(original)
+
+        with g.TemporaryDirectory() as d:
+            for ext in ['stl', 'ply']:
+                file_name = g.os.path.join(d, 'mesh.' + ext)
+                scene.export(file_name)
+                loaded = g.trimesh.load(file_name)
+                assert g.np.isclose(loaded.volume,
+                                    original.volume)
+        # nothing should have changed
+        assert original.identifier_hash == original_hash
+
+    def test_exact_bounds(self):
+        m = g.get_mesh('cycloidal.3DXML')
+        assert isinstance(m, g.trimesh.Scene)
+
+        dump = m.dump(concatenate=True)
+        assert isinstance(dump, g.trimesh.Trimesh)
+
+        # scene bounds should exactly match mesh bounds
+        assert g.np.allclose(m.bounds, dump.bounds)
+
+    def test_append_scenes(self):
+        scene_0 = g.trimesh.Scene(base_frame='not_world')
+        scene_1 = g.trimesh.Scene(base_frame='not_world')
+
+        scene_sum = g.trimesh.scene.scene.append_scenes(
+            (scene_0, scene_1), common=['not_world'], base_frame='not_world')
+
+        assert scene_sum.graph.base_frame == 'not_world'
 
 
 if __name__ == '__main__':

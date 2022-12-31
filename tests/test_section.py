@@ -233,12 +233,34 @@ class SliceTest(g.unittest.TestCase):
                    + 0.01 * g.trimesh.unitize([1, 0, 2])]
         normals = [g.trimesh.unitize([1, 1, 1]), g.trimesh.unitize([1, 2, 3])]
 
+    def test_slice_onplane(self):
+        m = g.get_mesh('featuretype.STL')
+        # on a plane with a lot of coplanar triangles
+        n = g.np.array([0, 0, 1.0])
+        o = g.np.array([0, 0, 1.0])
+
+        # slice the mesh in two pieces
+        a = m.slice_plane(plane_origin=o,
+                          plane_normal=-n,
+                          cap=True)
+        b = m.slice_plane(plane_origin=o,
+                          plane_normal=n,
+                          cap=True)
+
+        # both slices should be watertiight
+        assert a.is_watertight
+        assert b.is_watertight
+        # volume should match original
+        assert g.np.isclose(m.volume, a.volume + b.volume)
+
     def test_slice_submesh(self):
         bunny = g.get_mesh('bunny.ply')
 
         # Find the faces on the body.
-        neck_plane_origin = g.np.array([-0.0441905, 0.124347, 0.0235287])
-        neck_plane_normal = g.np.array([0.35534835, -0.93424839, -0.03012456])
+        neck_plane_origin = g.np.array(
+            [-0.0441905, 0.124347, 0.0235287])
+        neck_plane_normal = g.np.array(
+            [0.35534835, -0.93424839, -0.03012456])
 
         dots = g.np.einsum('i,ij->j', neck_plane_normal,
                            (bunny.vertices - neck_plane_origin).T)
@@ -272,13 +294,8 @@ class SliceTest(g.unittest.TestCase):
         # check to see if we handle capping with
         # existing coplanar faces correctly
 
-        try:
-            from triangle import triangulate  # NOQA
-        except BaseException as E:
-            if g.all_dep:
-                raise E
-            else:
-                return
+        if not g.has_earcut:
+            return
 
         s = g.get_mesh('cap.zip')
         mesh = next(iter(s.geometry.values()))
@@ -292,20 +309,38 @@ class SliceTest(g.unittest.TestCase):
                                    cap=True)
         assert newmesh.is_watertight
 
+    def test_slice_exit(self):
+        m = g.trimesh.creation.box()
+        assert g.np.isclose(m.area, 6)
+
+        # start with a slice plane at every vertex
+        origins = m.vertices.copy()
+        # box centered at origin so get a unit normal
+        normals = g.trimesh.unitize(origins)
+
+        # slice the tip of the box off
+        origins -= normals * 0.1
+        # make the first plane non-intersecting
+        # to test the early exit case
+        origins[0] += normals[0] * 10
+
+        # reverse the normals to indicate positive volume
+        normals *= -1
+
+        # run the slices
+        s = m.slice_plane(origins, normals)
+
+        assert g.np.isclose(s.area, 5.685)
+
     def test_cap_nohit(self):
         # check to see if we handle capping with
         # non-intersecting planes well
 
-        try:
-            from triangle import triangulate  # NOQA
-        except BaseException as E:
-            if g.all_dep:
-                raise E
-            else:
-                return
+        if not g.has_earcut:
+            return
 
+        from trimesh.transformations import random_rotation_matrix
         for i in range(100):
-            from trimesh.transformations import random_rotation_matrix
             box1 = g.trimesh.primitives.Box(
                 extents=[10, 20, 30],
                 transform=random_rotation_matrix())
@@ -321,15 +356,8 @@ class SliceTest(g.unittest.TestCase):
             assert len(result.faces) > 0
 
     def test_cap(self):
-
-        try:
-            from triangle import triangulate  # NOQA
-        except BaseException as E:
-            if g.all_dep:
-                raise E
-            else:
-                return
-
+        if not g.has_earcut:
+            return
         mesh = g.trimesh.creation.box()
 
         # Cut corner off of box and make sure the bounds and number of faces is correct

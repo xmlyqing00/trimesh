@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import numpy as np
 
@@ -6,6 +7,7 @@ from ..constants import log
 from .. import util
 from .. import resolvers
 
+from .threemf import export_3MF
 from .urdf import export_urdf  # NOQA
 from .gltf import export_glb, export_gltf
 from .obj import export_obj
@@ -145,7 +147,7 @@ def export_dict(mesh, encoding=None):
     return export
 
 
-def scene_to_dict(scene, use_base64=False):
+def scene_to_dict(scene, use_base64=False, include_metadata=True):
     """
     Export a Scene object as a dict.
 
@@ -167,6 +169,14 @@ def scene_to_dict(scene, use_base64=False):
                               'extents': scene.extents.tolist(),
                               'centroid': scene.centroid.tolist(),
                               'scale': scene.scale}}
+
+    if include_metadata:
+        try:
+            # jsonify will convert numpy arrays to lists recursively
+            # a little silly round-tripping to json but it is pretty fast
+            export['metadata'] = json.loads(util.jsonify(scene.metadata))
+        except BaseException:
+            log.warning('failed to serialize metadata', exc_info=True)
 
     # encode arrays with base64 or not
     if use_base64:
@@ -210,6 +220,9 @@ def export_scene(scene,
     export : bytes
       Only returned if file_obj is None
     """
+    if len(scene.geometry) == 0:
+        raise ValueError("Can't export empty scenes!")
+
     # if we weren't passed a file type extract from file_obj
     if file_type is None:
         if util.is_string(file_obj):
@@ -226,20 +239,22 @@ def export_scene(scene,
     elif file_type == 'glb':
         data = export_glb(scene, **kwargs)
     elif file_type == 'dict':
-        data = scene_to_dict(scene)
+        data = scene_to_dict(scene, *kwargs)
     elif file_type == 'obj':
         if resolver is None and util.is_string(file_obj):
             resolver = resolvers.FilePathResolver(file_obj)
-        data = export_obj(scene, resolver=resolver)
+        data = export_obj(scene, resolver=resolver, **kwargs)
     elif file_type == 'dict64':
         data = scene_to_dict(scene, use_base64=True)
     elif file_type == 'svg':
         from trimesh.path.exchange import svg_io
         data = svg_io.export_svg(scene, **kwargs)
     elif file_type == 'ply':
-        data = export_ply(scene)
+        data = export_ply(scene.dump(concatenate=True), **kwargs)
     elif file_type == 'stl':
-        data = export_stl(scene)
+        data = export_stl(scene.dump(concatenate=True), **kwargs)
+    elif file_type == '3mf':
+        data = export_3MF(scene, **kwargs)
     else:
         raise ValueError(
             'unsupported export format: {}'.format(file_type))
@@ -299,8 +314,12 @@ _mesh_exporters = {
     'gltf': export_gltf,
     'dict64': export_dict64,
     'msgpack': export_msgpack,
-    'stl_ascii': export_stl_ascii
-}
+    'stl_ascii': export_stl_ascii}
+
+# requires a newer `zipfile` module
+if sys.version_info >= (3, 6):
+    _mesh_exporters['3mf'] = export_3MF
+
 _mesh_exporters.update(_ply_exporters)
 _mesh_exporters.update(_off_exporters)
 _mesh_exporters.update(_collada_exporters)

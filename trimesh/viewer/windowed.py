@@ -12,6 +12,13 @@ import numpy as np
 
 import pyglet
 
+# pyglet 2.0 is close to a re-write moving from fixed-function
+# to shaders and we will likely support it by forking an entirely
+# new viewer `trimesh.viewer.shaders` and then basically keeping
+# `windowed` around for backwards-compatibility with no changes
+if int(pyglet.version.split('.')[0]) >= 2:
+    raise ImportError('`trimesh.viewer.windowed` requires `pip install "pyglet<2"`')
+
 from .trackball import Trackball
 
 from .. import util
@@ -260,18 +267,15 @@ class SceneViewer(pyglet.window.Window):
         # save the rendering mode from the constructor args
         self.vertex_list_mode[name] = args[1]
 
-        try:
-            # if a geometry has UV coordinates that match vertices
-            assert len(geometry.visual.uv) == len(geometry.vertices)
-            has_tex = True
-        except BaseException:
-            has_tex = False
-
-        if has_tex:
-            tex = rendering.material_to_texture(
-                geometry.visual.material)
-            if tex is not None:
-                self.textures[name] = tex
+        # get the visual if the element has it
+        visual = getattr(geometry, 'visual', None)
+        if hasattr(visual, 'uv') and hasattr(visual, 'material'):
+            try:
+                tex = rendering.material_to_texture(visual.material)
+                if tex is not None:
+                    self.textures[name] = tex
+            except BaseException:
+                util.log.warning('failed to load texture', exc_info=True)
 
     def cleanup_geometries(self):
         """
@@ -612,7 +616,7 @@ class SceneViewer(pyglet.window.Window):
         width, height = self._update_perspective(width, height)
         self.scene.camera.resolution = (width, height)
         self.view['ball'].resize(self.scene.camera.resolution)
-        self.scene.camera_transform[...] = self.view['ball'].pose
+        self.scene.camera_transform = self.view['ball'].pose
 
     def on_mouse_press(self, x, y, buttons, modifiers):
         """
@@ -634,21 +638,21 @@ class SceneViewer(pyglet.window.Window):
             self.view['ball'].set_state(Trackball.STATE_ZOOM)
 
         self.view['ball'].down(np.array([x, y]))
-        self.scene.camera_transform[...] = self.view['ball'].pose
+        self.scene.camera_transform = self.view['ball'].pose
 
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
         """
         Pan or rotate the view.
         """
         self.view['ball'].drag(np.array([x, y]))
-        self.scene.camera_transform[...] = self.view['ball'].pose
+        self.scene.camera_transform = self.view['ball'].pose
 
     def on_mouse_scroll(self, x, y, dx, dy):
         """
         Zoom the view.
         """
         self.view['ball'].scroll(dy)
-        self.scene.camera_transform[...] = self.view['ball'].pose
+        self.scene.camera_transform = self.view['ball'].pose
 
     def on_key_press(self, symbol, modifiers):
         """
@@ -686,7 +690,7 @@ class SceneViewer(pyglet.window.Window):
                 self.view['ball'].drag([0, -magnitude])
             elif symbol == pyglet.window.key.UP:
                 self.view['ball'].drag([0, magnitude])
-            self.scene.camera_transform[...] = self.view['ball'].pose
+            self.scene.camera_transform = self.view['ball'].pose
 
     def on_draw(self):
         """
@@ -1633,21 +1637,10 @@ def geometry_hash(geometry):
     ------------
     hash : str
     """
-    if hasattr(geometry, 'crc'):
-        # for most of our trimesh objects
-        h = str(geometry.crc())
-    elif hasattr(geometry, 'md5'):
-        h = geometry.md5()
-    elif hasattr(geometry, 'tostring'):
-        # for unwrap ndarray objects
-        h = str(hash(geometry.tostring()))
-
+    h = str(hash(geometry))
     if hasattr(geometry, 'visual'):
         # if visual properties are defined
-        h += str(geometry.visual.crc())
-    elif hasattr(geometry, 'visual_crc'):
-        # paths do not use the visual attribute
-        h += str(geometry.colors_crc())
+        h += str(hash(geometry.visual))
 
     return h
 
